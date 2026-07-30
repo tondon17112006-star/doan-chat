@@ -1,0 +1,49 @@
+# File: docker-compose.yml
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - lumina_mongo:/data/db
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - lumina_redis:/data
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: 5000
+      CLIENT_URL: http://localhost:4173
+      MONGODB_URI: mongodb://mongo:27017/lumina
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: docker-access-secret-change-me
+      JWT_REFRESH_SECRET: docker-refresh-secret-change-me
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongo
+      - redis
+
+  web:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "4173:80"
+    depends_on:
+      - api
+
+volumes:
+  lumina_mongo:
+  lumina_redis:

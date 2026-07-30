@@ -1,0 +1,23 @@
+{
+  "name": "lumina-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A polished realtime messaging platform inspired by Apple Messages.",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n API,WEB -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
+    "server": "npm run dev -w server",
+    "build": "npm run build -w client",
+    "test": "npm run test -w server && npm run test -w client",
+    "start": "npm run start -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
