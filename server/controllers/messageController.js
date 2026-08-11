@@ -4,6 +4,7 @@ import {
   createMessage,
   deleteMessage,
   getMessages,
+  isDirectConversationBlocked,
   markConversationRead,
   reactToMessage,
   togglePinnedMessage,
@@ -21,6 +22,8 @@ export const list = asyncHandler(async (request, response) => {
 });
 
 export const create = asyncHandler(async (request, response) => {
+  const blocked = await isDirectConversationBlocked(request.params.conversationId, request.user.id);
+  if (blocked) throw new AppError("You cannot send messages in a blocked direct conversation.", 403);
   const input = {
     ...request.body,
     content: cleanText(request.body.content),
@@ -39,7 +42,8 @@ export const create = asyncHandler(async (request, response) => {
 function normalizeAttachment(attachment) {
   if (!attachment || typeof attachment !== "object") return null;
   const url = String(attachment.url || "");
-  if (!url.startsWith("/uploads/") && !/^https:\/\//i.test(url)) return null;
+  const localUpload = /^\/api\/uploads\/[a-f0-9-]+\.[a-z0-9]+$/i.test(url);
+  if (!localUpload && !/^https:\/\//i.test(url)) return null;
   return {
     id: String(attachment.id || "").slice(0, 200),
     name: cleanText(String(attachment.name || "Attachment"), 255),
@@ -91,7 +95,8 @@ export const react = asyncHandler(async (request, response) => {
 });
 
 export const read = asyncHandler(async (request, response) => {
-  await markConversationRead(request.params.conversationId, request.user.id);
+  const marked = await markConversationRead(request.params.conversationId, request.user.id);
+  if (!marked) throw new AppError("Conversation not found.", 404);
   const payload = { conversationId: request.params.conversationId, userId: request.user.id, readAt: new Date().toISOString() };
   request.app.get("io")?.to(`conversation:${request.params.conversationId}`).emit("message:seen", payload);
   response.json({ success: true, data: payload });

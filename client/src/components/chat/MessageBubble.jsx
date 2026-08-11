@@ -22,6 +22,7 @@ import { chatApi } from "../../services/api.js";
 import { formatBytes, formatMessageTime } from "../../utils/format.js";
 import Avatar from "../common/Avatar.jsx";
 import { useUiStore } from "../../store/uiStore.js";
+import { SecureImage, SecureVideo, downloadPrivateUpload, usePrivateUploadUrl } from "../../hooks/usePrivateUploadUrl.jsx";
 
 const reactionChoices = ["👍", "❤️", "😂", "😮", "😢", "😡"];
 
@@ -125,31 +126,33 @@ function AttachmentContent({ attachments = [], type }) {
   if (type === "image" || attachments[0].type?.startsWith("image/")) {
     return (
       <div className={`image-grid images-${Math.min(attachments.length, 4)}`}>
-        {attachments.map((file) => <img key={file.id || file.url} src={file.url} alt={file.name || "Shared image"} loading="lazy" />)}
+        {attachments.map((file) => <SecureImage key={file.id || file.url} src={file.url} alt={file.name || "Shared image"} loading="lazy" />)}
       </div>
     );
   }
   if (type === "video" || attachments[0].type?.startsWith("video/")) {
-    return <video controls preload="metadata" src={attachments[0].url} />;
+    return <SecureVideo controls preload="metadata" src={attachments[0].url} />;
   }
   if (type === "audio" || attachments[0].type?.startsWith("audio/")) {
     return <VoiceMessage attachment={attachments[0]} />;
   }
   return attachments.map((file) => (
-    <a href={file.url} download={file.name} className="file-card" key={file.id || file.url}>
+    <button type="button" onClick={() => downloadPrivateUpload(file.url, file.name).catch(() => undefined)} className="file-card" key={file.id || file.url}>
       <span><HiDocument /></span>
       <div><strong>{file.name}</strong><small>{formatBytes(file.size)}</small></div>
       <HiArrowDownTray />
-    </a>
+    </button>
   ));
 }
 
 function VoiceMessage({ attachment }) {
   const audioRef = useRef(null);
+  const source = attachment.url;
+  const mediaUrl = usePrivateUploadUrl(source);
   const [playing, setPlaying] = useState(false);
   const bars = [8, 15, 22, 13, 25, 19, 28, 10, 23, 16, 27, 12, 20, 8, 17, 12, 25, 15, 9];
   function toggle() {
-    if (!audioRef.current || attachment.url === "#") return setPlaying((current) => !current);
+    if (!audioRef.current || !mediaUrl || source === "#") return setPlaying((current) => !current);
     if (playing) audioRef.current.pause();
     else audioRef.current.play();
     setPlaying(!playing);
@@ -159,7 +162,7 @@ function VoiceMessage({ attachment }) {
       <button type="button" onClick={toggle}>{playing ? <HiPause /> : <HiPlay />}</button>
       <div className="waveform">{bars.map((height, index) => <i key={index} style={{ height }} className={playing && index < 8 ? "played" : ""} />)}</div>
       <span>0:{String(attachment.duration || 18).padStart(2, "0")}</span>
-      {attachment.url !== "#" && <audio ref={audioRef} src={attachment.url} onEnded={() => setPlaying(false)} />}
+      {source !== "#" && mediaUrl && <audio ref={audioRef} src={mediaUrl} onEnded={() => setPlaying(false)} />}
     </div>
   );
 }

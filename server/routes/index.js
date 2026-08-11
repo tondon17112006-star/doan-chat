@@ -9,6 +9,7 @@ import * as userController from "../controllers/userController.js";
 import { authenticate, authorize } from "../middlewares/auth.js";
 import { upload } from "../middlewares/upload.js";
 import { validate } from "../middlewares/validate.js";
+import { forgotPasswordRateLimits, loginRateLimits } from "../middlewares/authRateLimit.js";
 
 export const apiRouter = Router();
 
@@ -24,6 +25,7 @@ apiRouter.post(
 );
 apiRouter.post(
   "/auth/login",
+  ...loginRateLimits,
   body("email").isEmail().normalizeEmail(),
   body("password").isString().notEmpty(),
   validate,
@@ -31,7 +33,7 @@ apiRouter.post(
 );
 apiRouter.post("/auth/demo", authController.demo);
 apiRouter.post("/auth/refresh", authController.refresh);
-apiRouter.post("/auth/forgot-password", body("email").isEmail().normalizeEmail(), validate, authController.forgotPassword);
+apiRouter.post("/auth/forgot-password", ...forgotPasswordRateLimits, body("email").isEmail().normalizeEmail(), validate, authController.forgotPassword);
 apiRouter.post(
   "/auth/verify-otp",
   body("email").isEmail().normalizeEmail(),
@@ -43,6 +45,8 @@ apiRouter.post(
 apiRouter.post("/auth/send-verification", body("email").isEmail().normalizeEmail(), validate, authController.sendVerification);
 apiRouter.post("/auth/logout", authenticate, authController.logout);
 apiRouter.get("/auth/sessions", authenticate, authController.sessions);
+apiRouter.delete("/auth/sessions/:id", param("id").isUUID(), validate, authenticate, authController.revokeSession);
+apiRouter.post("/auth/logout-others", authenticate, authController.logoutOthers);
 
 apiRouter.use(authenticate);
 
@@ -51,8 +55,8 @@ apiRouter.get("/users/me", userController.me);
 apiRouter.patch("/users/me", userController.updateProfile);
 apiRouter.patch(
   "/users/me/password",
-  body("currentPassword").isString().notEmpty(),
-  body("newPassword").isLength({ min: 8, max: 128 }),
+  body("currentPassword").isString().notEmpty().isLength({ max: 128 }),
+  body("newPassword").isString().isLength({ min: 8, max: 128 }),
   validate,
   userController.changePassword,
 );
@@ -65,6 +69,10 @@ apiRouter.patch(
 );
 apiRouter.get("/users/:id", param("id").isString().notEmpty(), validate, userController.profile);
 
+apiRouter.get("/friends", socialController.friends);
+apiRouter.get("/friends/requests/received", socialController.receivedRequests);
+apiRouter.get("/friends/requests/sent", socialController.sentRequests);
+
 apiRouter.get("/conversations", conversationController.list);
 apiRouter.post(
   "/conversations",
@@ -74,8 +82,19 @@ apiRouter.post(
   conversationController.create,
 );
 apiRouter.get("/conversations/:id", conversationController.getOne);
-apiRouter.patch("/conversations/:id", conversationController.update);
+apiRouter.patch(
+  "/conversations/:id",
+  body("name").optional().isString().isLength({ min: 1, max: 100 }),
+  body("avatar").optional().isString().isLength({ max: 2_000 }),
+  body("color").optional().isString().isLength({ min: 1, max: 40 }),
+  body("participants").optional().isArray({ min: 1, max: 100 }),
+  body("admins").optional().isArray({ min: 1, max: 100 }),
+  body(["muted", "pinned", "favorite", "archived"]).optional().isBoolean(),
+  validate,
+  conversationController.update,
+);
 apiRouter.post("/conversations/:id/leave", conversationController.leave);
+apiRouter.delete("/conversations/:id", conversationController.remove);
 
 apiRouter.get("/messages/:conversationId", query("limit").optional().isInt({ min: 1, max: 100 }), validate, messageController.list);
 apiRouter.post(
@@ -91,8 +110,15 @@ apiRouter.delete("/messages/item/:id", messageController.remove);
 apiRouter.post("/messages/item/:id/reaction", body("emoji").optional({ nullable: true }).isString().isLength({ max: 16 }), validate, messageController.react);
 apiRouter.post("/messages/item/:id/pin", messageController.pin);
 
-apiRouter.post("/uploads", upload.array("files", 10), miscController.uploadFiles);
-apiRouter.post("/friends/:id", body("action").isIn(["request", "accept", "decline", "remove", "block", "unblock"]), validate, socialController.friend);
+apiRouter.post(
+  "/uploads",
+  query("purpose").optional().isIn(["attachment", "avatar", "story"]),
+  validate,
+  upload.array("files", 10),
+  miscController.uploadFiles,
+);
+apiRouter.get("/uploads/:filename", param("filename").matches(/^[a-f0-9-]+\.[a-z0-9]+$/i), validate, miscController.downloadUpload);
+apiRouter.post("/friends/:id", body("action").isIn(["request", "accept", "decline", "cancel", "remove", "block", "unblock"]), validate, socialController.friend);
 apiRouter.get("/stories", socialController.stories);
 apiRouter.post("/stories", body("mediaUrl").isString().notEmpty(), body("type").optional().isIn(["image", "video"]), validate, socialController.addStory);
 apiRouter.post("/stories/:id/view", socialController.seeStory);

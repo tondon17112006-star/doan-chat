@@ -47,6 +47,11 @@ export function useRealtime() {
     socket.on("group:update", () => queryClient.invalidateQueries({ queryKey: ["conversations"] }));
     socket.on("story:new", () => queryClient.invalidateQueries({ queryKey: ["stories"] }));
     socket.on("notification:new", () => queryClient.invalidateQueries({ queryKey: ["notifications"] }));
+    socket.on("friend:update", () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      queryClient.invalidateQueries({ queryKey: ["friends"] });
+      queryClient.invalidateQueries({ queryKey: ["friend-requests"] });
+    });
     socket.on("call:incoming", (call) => setActiveCall({ ...call, incoming: true, status: "ringing" }));
 
     return () => {
@@ -55,6 +60,7 @@ export function useRealtime() {
       socket.off("message:delete", editTimeline);
       socket.off("reaction:update", editTimeline);
       socket.off("presence:update", presence);
+      socket.off("friend:update");
       disconnectSocket();
     };
   }, [token, queryClient, setActiveCall]);

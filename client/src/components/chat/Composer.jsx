@@ -16,6 +16,7 @@ import {
 import { chatApi } from "../../services/api.js";
 import { getSocket } from "../../services/socket.js";
 import { formatBytes } from "../../utils/format.js";
+import { SecureImage } from "../../hooks/usePrivateUploadUrl.jsx";
 
 const gifs = [
   { label: "Excited", url: "https://media.giphy.com/media/o75ajIFH0QnQC3nCeD/giphy.gif" },
@@ -157,7 +158,7 @@ export default function Composer({ conversationId, replyingTo, onCancelReply, on
           <motion.div className="attachment-preview" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}>
             {attachments.map((file, index) => (
               <div className="preview-file" key={file.id || file.url}>
-                {file.type?.startsWith("image/") ? <img src={file.url} alt="" /> : <HiOutlinePaperClip />}
+                {file.type?.startsWith("image/") ? <SecureImage src={file.url} alt="" /> : <HiOutlinePaperClip />}
                 <span>{file.name}<small>{formatBytes(file.size)}</small></span>
                 <button type="button" onClick={() => setAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))}><HiXMark /></button>
               </div>

@@ -1,7 +1,5 @@
 // File: server/app.js
 import express from "express";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
@@ -14,10 +12,10 @@ import swaggerUi from "swagger-ui-express";
 import { env } from "./config/env.js";
 import { swaggerDocument } from "./config/swagger.js";
 import { apiRouter } from "./routes/index.js";
+import * as miscController from "./controllers/miscController.js";
 import { errorHandler, notFound } from "./middlewares/error.js";
 import { originGuard } from "./middlewares/security.js";
 
-const directory = path.dirname(fileURLToPath(import.meta.url));
 export const app = express();
 
 app.set("trust proxy", 1);
@@ -46,7 +44,7 @@ app.use(
     legacyHeaders: false,
   }),
 );
-app.use("/uploads", express.static(path.resolve(directory, "uploads"), { maxAge: "7d", immutable: true }));
+app.get("/uploads/:filename", miscController.servePublicDemoUpload);
 app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument, { customSiteTitle: "Lumina API" }));
 app.use("/api", apiRouter);
 app.use(notFound);
