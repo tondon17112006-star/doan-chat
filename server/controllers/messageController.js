@@ -24,25 +24,48 @@ export const create = asyncHandler(async (request, response) => {
   const input = {
     ...request.body,
     content: cleanText(request.body.content),
-    attachments: Array.isArray(request.body.attachments) ? request.body.attachments.slice(0, 10) : [],
+    attachments: Array.isArray(request.body.attachments)
+      ? request.body.attachments.slice(0, 10).map(normalizeAttachment).filter(Boolean)
+      : [],
   };
   const message = await createMessage(request.user.id, request.params.conversationId, input);
   if (!message) throw new AppError("Conversation not found.", 404);
   request.app.get("io")?.to(`conversation:${request.params.conversationId}`).emit("message:new", message);
   response.status(201).json({ success: true, data: message });
 
-  if (request.params.conversationId === "c-ai") {
-    request.app.get("io")?.to(`conversation:${request.params.conversationId}`).emit("typing:start", {
-      conversationId: request.params.conversationId,
-      user: { id: "u-lumina", username: "Lumina AI" },
-      activity: "typing",
-    });
-    const reply = await generateAiReply(input.content);
-    const aiMessage = await createMessage("u-lumina", "c-ai", { type: "text", content: reply });
-    request.app.get("io")?.to("conversation:c-ai").emit("typing:stop", { conversationId: "c-ai", userId: "u-lumina" });
-    request.app.get("io")?.to("conversation:c-ai").emit("message:new", aiMessage);
-  }
+  if (request.params.conversationId === "c-ai") void replyAsLumina(request.app.get("io"), input.content);
 });
+
+function normalizeAttachment(attachment) {
+  if (!attachment || typeof attachment !== "object") return null;
+  const url = String(attachment.url || "");
+  if (!url.startsWith("/uploads/") && !/^https:\/\//i.test(url)) return null;
+  return {
+    id: String(attachment.id || "").slice(0, 200),
+    name: cleanText(String(attachment.name || "Attachment"), 255),
+    type: String(attachment.type || "application/octet-stream").slice(0, 100),
+    size: Math.max(0, Number(attachment.size) || 0),
+    url,
+    ...(attachment.duration ? { duration: Math.max(0, Number(attachment.duration) || 0) } : {}),
+  };
+}
+
+async function replyAsLumina(io, content) {
+  io?.to("conversation:c-ai").emit("typing:start", {
+    conversationId: "c-ai",
+    user: { id: "u-lumina", username: "Lumina AI" },
+    activity: "typing",
+  });
+  try {
+    const reply = await generateAiReply(content);
+    const aiMessage = await createMessage("u-lumina", "c-ai", { type: "text", content: reply });
+    io?.to("conversation:c-ai").emit("message:new", aiMessage);
+  } catch (error) {
+    console.error("Lumina AI reply failed:", error.message);
+  } finally {
+    io?.to("conversation:c-ai").emit("typing:stop", { conversationId: "c-ai", userId: "u-lumina" });
+  }
+}
 
 export const edit = asyncHandler(async (request, response) => {
   const message = await updateMessage(request.params.id, request.user.id, cleanText(request.body.content));

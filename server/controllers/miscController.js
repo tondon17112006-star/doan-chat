@@ -1,5 +1,6 @@
 // File: server/controllers/miscController.js
 import path from "node:path";
+import { unlink } from "node:fs/promises";
 import sharp from "sharp";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { adminStats, getSettings, searchEverything, updateSettings } from "../services/dataService.js";
@@ -13,6 +14,7 @@ export const uploadFiles = asyncHandler(async (request, response) => {
     if (file.mimetype.startsWith("image/") && !["image/gif"].includes(file.mimetype) && file.size > 500_000) {
       const target = file.path.replace(path.extname(file.path), ".webp");
       const result = await sharp(file.path).rotate().resize({ width: 2200, withoutEnlargement: true }).webp({ quality: 84 }).toFile(target);
+      if (target !== file.path) await unlink(file.path).catch(() => undefined);
       filename = path.basename(target);
       size = result.size;
     }
