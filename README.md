@@ -21,6 +21,12 @@ so it works immediately. Log in with `alex@lumina.chat` / `Password123!`, or cho
 the demo button. Copy `.env.example` to `.env` and set `MONGODB_URI` for persistent
 MongoDB storage.
 
+The browser client cannot provide login, messages or realtime updates by itself:
+run `npm run dev` from the repository root so both the Vite client and Express /
+Socket.IO API start together. MongoDB and Redis are optional for local demo mode.
+Never commit `.env`; if it has previously been pushed, remove it from Git history
+and rotate every secret it contained.
+
 ## Scripts
 
 - `npm run dev` — run the Vite client and API together.
