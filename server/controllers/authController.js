@@ -35,7 +35,7 @@ export const demo = asyncHandler(async (request, response) => {
 
 export const refresh = asyncHandler(async (request, response) => {
   const result = await authService.refreshSession(request.cookies.lumina_refresh || request.body.refreshToken, request);
-  response.cookie("lumina_refresh", result.refreshToken, cookieOptions(true));
+  response.cookie("lumina_refresh", result.refreshToken, cookieOptions(result.remember));
   response.json({ success: true, data: { user: result.user, accessToken: result.accessToken } });
 });
 
@@ -67,5 +67,18 @@ export const verifyOtp = asyncHandler(async (request, response) => {
 });
 
 export const sessions = asyncHandler(async (request, response) => {
-  response.json({ success: true, data: await authService.getSessions(request.user.id) });
+  response.json({ success: true, data: await authService.getSessions(request.user.id, request.cookies.lumina_refresh) });
+});
+
+export const revokeSession = asyncHandler(async (request, response) => {
+  const result = await authService.revokeSession(request.user.id, request.params.id, request.cookies.lumina_refresh);
+  if (result.isCurrent) response.clearCookie("lumina_refresh", { path: "/api/auth" });
+  await audit(request, "logout", "session", request.params.id, { kind: "single-session" });
+  response.status(204).end();
+});
+
+export const logoutOthers = asyncHandler(async (request, response) => {
+  const result = await authService.logoutOtherSessions(request.user.id, request.cookies.lumina_refresh);
+  await audit(request, "logout", "session", null, { kind: "other-sessions", revoked: result.revoked });
+  response.json({ success: true, data: result });
 });

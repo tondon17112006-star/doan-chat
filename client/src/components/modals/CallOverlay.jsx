@@ -41,7 +41,7 @@ export default function CallOverlay() {
         if (remoteVideo.current) remoteVideo.current.srcObject = event.streams[0];
         setConnected(true);
       };
-      connection.onicecandidate = (event) => event.candidate && socket?.emit("webrtc:ice", { targetId: target?.id, candidate: event.candidate });
+      connection.onicecandidate = (event) => event.candidate && socket?.emit("webrtc:ice", { conversationId: call.conversationId, targetId: target?.id, candidate: event.candidate });
       peer.current = connection;
       return connection;
     };
@@ -60,14 +60,14 @@ export default function CallOverlay() {
       const connection = createPeer();
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
-      socket.emit("webrtc:offer", { targetId: payload.user.id, offer });
+      socket.emit("webrtc:offer", { conversationId: call.conversationId, targetId: payload.user.id, offer });
     };
     const offer = async (payload) => {
       const connection = createPeer();
       await connection.setRemoteDescription(payload.offer);
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
-      socket.emit("webrtc:answer", { targetId: payload.fromId, answer });
+      socket.emit("webrtc:answer", { conversationId: call.conversationId, targetId: payload.fromId, answer });
       setConnected(true);
     };
     const answer = async (payload) => {
@@ -158,7 +158,7 @@ export default function CallOverlay() {
           </div>
           {call.incoming && !connected ? (
             <div className="incoming-call-actions">
-              <button type="button" className="decline" onClick={() => { getSocket()?.emit("call:reject", { callerId: call.caller.id }); end(false); }}><HiPhoneXMark /><span>Decline</span></button>
+              <button type="button" className="decline" onClick={() => { getSocket()?.emit("call:reject", { callerId: call.caller.id, conversationId: call.conversationId }); end(false); }}><HiPhoneXMark /><span>Decline</span></button>
               <button type="button" className="accept" onClick={accept}><HiPhone /><span>Accept</span></button>
             </div>
           ) : (

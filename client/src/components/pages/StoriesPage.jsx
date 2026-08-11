@@ -10,6 +10,7 @@ import Modal from "../common/Modal.jsx";
 import { chatApi, socialApi } from "../../services/api.js";
 import { useUiStore } from "../../store/uiStore.js";
 import { useAuthStore } from "../../store/authStore.js";
+import { SecureImage, SecureVideo } from "../../hooks/usePrivateUploadUrl.jsx";
 
 export default function StoriesPage() {
   const [createOpen, setCreateOpen] = useState(false);
@@ -53,7 +54,7 @@ export default function StoriesPage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: index * 0.07 }}
             >
-              {story.type === "video" ? <video src={story.mediaUrl} muted /> : <img src={story.mediaUrl} alt={story.caption} />}
+              {story.type === "video" ? <SecureVideo src={story.mediaUrl} muted /> : <SecureImage src={story.mediaUrl} alt={story.caption} />}
               <span className="story-tile-overlay" />
               {story.type === "video" && <span className="story-play"><HiPlay /></span>}
               <span className="story-owner"><Avatar user={story.user} size="sm" /><span><strong>{story.user?.username}</strong><small>{timeAgo(story.createdAt)}</small></span></span>
@@ -75,7 +76,7 @@ function CreateStoryModal({ open, onClose }) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: async () => {
-      const [uploaded] = await chatApi.upload([file]);
+      const [uploaded] = await chatApi.upload([file], "story");
       return socialApi.addStory({ type: file.type.startsWith("video/") ? "video" : "image", mediaUrl: uploaded.url, caption });
     },
     onSuccess: () => {

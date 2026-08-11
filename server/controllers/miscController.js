@@ -1,34 +1,95 @@
 // File: server/controllers/miscController.js
 import path from "node:path";
-import { unlink } from "node:fs/promises";
+import { access, constants, unlink } from "node:fs/promises";
 import sharp from "sharp";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { adminStats, getSettings, searchEverything, updateSettings } from "../services/dataService.js";
+import {
+  adminStats,
+  assertUploadQuota,
+  canUserReadUpload,
+  findPublicDemoUpload,
+  findUploadByFilename,
+  getSettings,
+  registerUploads,
+  searchEverything,
+  updateSettings,
+} from "../services/dataService.js";
 import { audit } from "../services/auditService.js";
+import { safeOriginalName, uploadDirectory, validateUploadedFile } from "../middlewares/upload.js";
+import { AppError } from "../utils/AppError.js";
 
 export const uploadFiles = asyncHandler(async (request, response) => {
-  const files = [];
-  for (const file of request.files || []) {
-    let filename = file.filename;
-    let size = file.size;
-    if (file.mimetype.startsWith("image/") && !["image/gif"].includes(file.mimetype) && file.size > 500_000) {
-      const target = file.path.replace(path.extname(file.path), ".webp");
-      const result = await sharp(file.path).rotate().resize({ width: 2200, withoutEnlargement: true }).webp({ quality: 84 }).toFile(target);
-      if (target !== file.path) await unlink(file.path).catch(() => undefined);
-      filename = path.basename(target);
-      size = result.size;
+  const uploadedPaths = new Set((request.files || []).map((file) => file.path));
+  try {
+    await assertUploadQuota(request.user.id, (request.files || []).reduce((total, file) => total + file.size, 0));
+    const files = [];
+    for (const file of request.files || []) {
+      await validateUploadedFile(file);
+      let filename = file.filename;
+      let size = file.size;
+      let mimeType = file.mimetype;
+      if (file.mimetype.startsWith("image/") && file.mimetype !== "image/gif" && file.size > 500_000) {
+        const target = file.path.replace(path.extname(file.path), ".webp");
+        uploadedPaths.add(target);
+        const result = await sharp(file.path).rotate().resize({ width: 2200, withoutEnlargement: true }).webp({ quality: 84 }).toFile(target);
+        await unlink(file.path);
+        uploadedPaths.delete(file.path);
+        filename = path.basename(target);
+        size = result.size;
+        mimeType = "image/webp";
+      }
+      files.push({ filename, originalName: safeOriginalName(file.originalname), mimeType, size });
     }
-    files.push({
-      id: filename,
-      name: file.originalname,
-      type: file.mimetype,
-      size,
-      url: `/uploads/${filename}`,
+    const purpose = ["attachment", "avatar", "story"].includes(request.query.purpose) ? request.query.purpose : "attachment";
+    const records = await registerUploads(request.user.id, files, purpose);
+    await audit(request, "upload", "file", null, { count: records.length, purpose });
+    response.status(201).json({
+      success: true,
+      data: records.map((file) => ({
+        id: file.id,
+        name: file.originalName,
+        type: file.mimeType,
+        size: file.size,
+        url: `/api/uploads/${file.filename}`,
+      })),
     });
+  } catch (error) {
+    await Promise.all([...uploadedPaths].map((filePath) => unlink(filePath).catch(() => undefined)));
+    throw error;
   }
-  await audit(request, "upload", "file", null, { count: files.length });
-  response.status(201).json({ success: true, data: files });
 });
+
+export const downloadUpload = asyncHandler(async (request, response) => {
+  const file = await findUploadByFilename(request.params.filename);
+  if (!file) throw new AppError("File not found.", 404);
+  if (!(await canUserReadUpload(request.user.id, file.filename))) {
+    throw new AppError("You do not have permission to access this file.", 403);
+  }
+  await sendStoredUpload(file, response, "private, max-age=0, must-revalidate");
+});
+
+export const servePublicDemoUpload = asyncHandler(async (request, response) => {
+  const file = await findPublicDemoUpload(request.params.filename);
+  if (!file) throw new AppError("File not found.", 404);
+  await sendStoredUpload(file, response, "public, max-age=604800, immutable");
+});
+
+async function sendStoredUpload(file, response, cacheControl) {
+  const filePath = path.resolve(uploadDirectory, file.filename);
+  if (path.dirname(filePath) !== uploadDirectory) throw new AppError("File not found.", 404);
+  try {
+    await access(filePath, constants.R_OK);
+  } catch {
+    throw new AppError("File not found.", 404);
+  }
+  response.set({
+    "Cache-Control": cacheControl,
+    "X-Content-Type-Options": "nosniff",
+    "Content-Disposition": `inline; filename="${String(file.originalName || file.filename).replace(/["\\]/g, "_")}"`,
+  });
+  response.type(file.mimeType);
+  response.sendFile(filePath);
+}
 
 export const search = asyncHandler(async (request, response) => {
   response.json({ success: true, data: await searchEverything(request.user.id, request.query.q) });

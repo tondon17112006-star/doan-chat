@@ -57,6 +57,10 @@ export const authApi = {
   register: (payload) => unwrap(api.post("/auth/register", { ...payload, device: deviceInfo() })),
   demo: () => unwrap(api.post("/auth/demo", { device: deviceInfo() })),
   logout: (allDevices = false) => api.post("/auth/logout", { allDevices }),
+  sessions: () => unwrap(api.get("/auth/sessions")),
+  revokeSession: (id) => api.delete(`/auth/sessions/${id}`),
+  logoutOtherSessions: () => unwrap(api.post("/auth/logout-others")),
+  changePassword: (payload) => unwrap(api.patch("/users/me/password", payload)),
   forgotPassword: (email) => unwrap(api.post("/auth/forgot-password", { email })),
   verifyOtp: (payload) => unwrap(api.post("/auth/verify-otp", payload))
 };
@@ -66,6 +70,8 @@ export const chatApi = {
   conversation: (id) => unwrap(api.get(`/conversations/${id}`)),
   createConversation: (payload) => unwrap(api.post("/conversations", payload)),
   updateConversation: (id, payload) => unwrap(api.patch(`/conversations/${id}`, payload)),
+  deleteConversation: (id) => api.delete(`/conversations/${id}`),
+  leaveConversation: (id) => unwrap(api.post(`/conversations/${id}/leave`)),
   messages: (id, params) => unwrap(api.get(`/messages/${id}`, { params })),
   send: (id, payload) => unwrap(api.post(`/messages/${id}`, payload)),
   edit: (id, content) => unwrap(api.patch(`/messages/item/${id}`, { content })),
@@ -73,16 +79,18 @@ export const chatApi = {
   react: (id, emoji) => unwrap(api.post(`/messages/item/${id}/reaction`, { emoji })),
   pin: (id) => unwrap(api.post(`/messages/item/${id}/pin`)),
   read: (id) => unwrap(api.post(`/messages/${id}/read`)),
-  upload: (files) => {
+  upload: (files, purpose = "attachment") => {
     const body = new FormData();
     files.forEach((file) => body.append("files", file));
-    return unwrap(api.post("/uploads", body, { headers: { "Content-Type": "multipart/form-data" } }));
+    return unwrap(api.post("/uploads", body, { params: { purpose }, headers: { "Content-Type": "multipart/form-data" } }));
   }
 };
 
 export const socialApi = {
   users: (q = "") => unwrap(api.get("/users", { params: { q } })),
   updateProfile: (payload) => unwrap(api.patch("/users/me", payload)),
+  friends: () => unwrap(api.get("/friends")),
+  friendRequests: (direction) => unwrap(api.get(`/friends/requests/${direction}`)),
   friendAction: (id, action) => unwrap(api.post(`/friends/${id}`, { action })),
   stories: () => unwrap(api.get("/stories")),
   addStory: (payload) => unwrap(api.post("/stories", payload)),

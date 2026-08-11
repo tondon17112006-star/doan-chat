@@ -184,6 +184,7 @@ function ForgotPasswordDialog({ open, onClose }) {
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [developmentOtp, setDevelopmentOtp] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -193,6 +194,7 @@ function ForgotPasswordDialog({ open, onClose }) {
     setEmail("");
     setOtp("");
     setPassword("");
+    setConfirmPassword("");
     setDevelopmentOtp("");
     setMessage("");
     onClose();
@@ -204,7 +206,7 @@ function ForgotPasswordDialog({ open, onClose }) {
     setMessage("");
     try {
       const result = await authApi.forgotPassword(email);
-      setDevelopmentOtp(result.developmentOtp || "");
+      setDevelopmentOtp(result.debugOtp || "");
       setStep("otp");
     } catch (error) {
       setMessage(error.response?.data?.message || "Could not send the code.");
@@ -215,6 +217,14 @@ function ForgotPasswordDialog({ open, onClose }) {
 
   async function resetPassword(event) {
     event.preventDefault();
+    if (password.length < 8) {
+      setMessage("Use at least 8 characters for your new password.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setMessage("The password confirmation does not match.");
+      return;
+    }
     setLoading(true);
     setMessage("");
     try {
@@ -243,6 +253,7 @@ function ForgotPasswordDialog({ open, onClose }) {
           {developmentOtp && <div className="development-otp">Local development code: <strong>{developmentOtp}</strong></div>}
           <label><span>Verification code</span><input value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} required pattern="\d{6}" placeholder="000000" className="otp-input" autoFocus /></label>
           <label><span>New password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={8} placeholder="At least 8 characters" /></label>
+          <label><span>Confirm new password</span><input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required minLength={8} placeholder="Repeat your new password" /></label>
           {message && <div className="form-error">{message}</div>}
           <button className="primary-button" disabled={loading || otp.length !== 6}>{loading ? "Updating…" : "Set new password"}</button>
         </form>

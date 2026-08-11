@@ -1,6 +1,6 @@
 // File: client/src/components/pages/SettingsPage.jsx
-import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   HiBell,
   HiCheck,
@@ -15,7 +15,7 @@ import {
 } from "react-icons/hi2";
 import PageFrame from "./PageFrame.jsx";
 import Avatar from "../common/Avatar.jsx";
-import { socialApi } from "../../services/api.js";
+import { authApi, chatApi, socialApi } from "../../services/api.js";
 import { useAuthStore } from "../../store/authStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 
@@ -38,12 +38,28 @@ export default function SettingsPage() {
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: socialApi.settings });
   const [form, setForm] = useState({ username: user.username, bio: user.bio || "", status: user.status || "", location: user.location || "" });
   const [prefs, setPrefs] = useState(null);
+  const [profileError, setProfileError] = useState("");
+  const avatarInputRef = useRef(null);
   const profileMutation = useMutation({
     mutationFn: socialApi.updateProfile,
+    onMutate: () => setProfileError(""),
     onSuccess: (updated) => {
       patchUser(updated);
       flashSaved();
-    }
+    },
+    onError: (requestError) => setProfileError(requestError.response?.data?.message || "Could not save your profile."),
+  });
+  const avatarMutation = useMutation({
+    mutationFn: async (file) => {
+      const [uploaded] = await chatApi.upload([file], "avatar");
+      return socialApi.updateProfile({ avatar: uploaded.url });
+    },
+    onMutate: () => setProfileError(""),
+    onSuccess: (updated) => {
+      patchUser(updated);
+      flashSaved();
+    },
+    onError: (requestError) => setProfileError(requestError.response?.data?.message || "Could not upload your profile photo."),
   });
   const settingsMutation = useMutation({
     mutationFn: socialApi.saveSettings,
@@ -59,6 +75,14 @@ export default function SettingsPage() {
     const [group, key] = path.split(".");
     setPrefs((current) => ({ ...current, [group]: { ...current[group], [key]: value } }));
   }
+  function chooseAvatar(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return setProfileError("Choose an image file for your profile photo.");
+    if (file.size > 10 * 1024 * 1024) return setProfileError("Your profile photo must be 10 MB or smaller.");
+    avatarMutation.mutate(file);
+  }
 
   return (
     <PageFrame eyebrow="Make it yours" title="Settings" subtitle="Tune Lumina to feel just right." searchable={false}>
@@ -70,7 +94,8 @@ export default function SettingsPage() {
           {section === "profile" && (
             <>
               <SettingsHeading title="Your profile" subtitle="This is how you appear to people on Lumina." />
-              <div className="profile-photo-setting"><Avatar user={user} size="xl" /><div><button type="button">Change photo</button><span>JPG, PNG or WEBP · Max 10 MB</span></div></div>
+              <div className="profile-photo-setting"><Avatar user={user} size="xl" /><div><input ref={avatarInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onChange={chooseAvatar} /><button type="button" onClick={() => avatarInputRef.current?.click()} disabled={avatarMutation.isPending}>{avatarMutation.isPending ? "Uploading…" : "Change photo"}</button><span>JPG, PNG, WEBP or GIF · Max 10 MB</span></div></div>
+              {profileError && <p className="settings-error" role="alert">{profileError}</p>}
               <div className="settings-form-grid">
                 <label><span>Display name</span><input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
                 <label><span>Status</span><input value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })} /></label>
@@ -141,13 +166,78 @@ function SaveBar({ saved, pending, onSave }) {
   return <div className="save-bar"><span>{saved && <><HiCheck /> Changes saved</>}</span><button type="button" className="primary-button compact" onClick={onSave} disabled={pending}>{pending ? "Saving…" : "Save changes"}</button></div>;
 }
 function SecuritySettings() {
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwords, setPasswords] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
+  const [error, setError] = useState("");
+  const queryClient = useQueryClient();
+  const patchUser = useAuthStore((state) => state.patchUser);
+  const { data: sessions = [], isLoading } = useQuery({ queryKey: ["auth-sessions"], queryFn: authApi.sessions });
+  const passwordMutation = useMutation({
+    mutationFn: authApi.changePassword,
+    onMutate: () => setError(""),
+    onSuccess: (result) => {
+      patchUser(result.user);
+      setPasswords({ currentPassword: "", newPassword: "", confirmPassword: "" });
+      setChangingPassword(false);
+      queryClient.invalidateQueries({ queryKey: ["auth-sessions"] });
+    },
+    onError: (requestError) => setError(requestError.response?.data?.message || "Could not update your password."),
+  });
+  const revokeMutation = useMutation({
+    mutationFn: authApi.revokeSession,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["auth-sessions"] }),
+    onError: (requestError) => setError(requestError.response?.data?.message || "Could not sign out that device."),
+  });
+  const logoutOthersMutation = useMutation({
+    mutationFn: authApi.logoutOtherSessions,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["auth-sessions"] }),
+    onError: (requestError) => setError(requestError.response?.data?.message || "Could not sign out the other devices."),
+  });
+  const hasOtherSessions = sessions.some((session) => !session.isCurrent);
+
+  function submitPassword(event) {
+    event.preventDefault();
+    if (passwords.newPassword.length < 8) return setError("Use at least 8 characters for your new password.");
+    if (passwords.currentPassword === passwords.newPassword) return setError("Your new password must be different from your current password.");
+    if (passwords.newPassword !== passwords.confirmPassword) return setError("The password confirmation does not match.");
+    passwordMutation.mutate({ currentPassword: passwords.currentPassword, newPassword: passwords.newPassword });
+  }
+
   return (
     <>
       <SettingsHeading title="Password & devices" subtitle="Protect your account and review active sessions." />
-      <div className="security-card"><span><HiKey /></span><div><strong>Password</strong><p>Last changed 3 months ago</p></div><button type="button">Change password</button></div>
+      <div className="security-card"><span><HiKey /></span><div><strong>Password</strong><p>Use a unique password with at least 8 characters.</p></div><button type="button" onClick={() => { setChangingPassword((current) => !current); setError(""); }}>{changingPassword ? "Cancel" : "Change password"}</button></div>
+      {changingPassword && (
+        <form className="security-password-form" onSubmit={submitPassword}>
+          <label><span>Current password</span><input type="password" autoComplete="current-password" value={passwords.currentPassword} onChange={(event) => setPasswords({ ...passwords, currentPassword: event.target.value })} required maxLength={128} /></label>
+          <label><span>New password</span><input type="password" autoComplete="new-password" value={passwords.newPassword} onChange={(event) => setPasswords({ ...passwords, newPassword: event.target.value })} required minLength={8} maxLength={128} /></label>
+          <label><span>Confirm new password</span><input type="password" autoComplete="new-password" value={passwords.confirmPassword} onChange={(event) => setPasswords({ ...passwords, confirmPassword: event.target.value })} required minLength={8} maxLength={128} /></label>
+          <button type="submit" className="primary-button compact" disabled={passwordMutation.isPending}>{passwordMutation.isPending ? "Updating…" : "Update password"}</button>
+        </form>
+      )}
+      {error && <p className="security-error" role="alert">{error}</p>}
       <SettingsHeading title="Active devices" subtitle="You’re currently signed in on these devices." small />
-      <div className="device-card"><span><HiComputerDesktop /></span><div><strong>This browser</strong><p>Ho Chi Minh City · Active now</p></div><b>Current</b></div>
-      <button type="button" className="outline-danger">Sign out of all other devices</button>
+      <div className="device-list">
+        {isLoading && <div className="device-card"><span><HiComputerDesktop /></span><div><strong>Loading devices…</strong></div></div>}
+        {!isLoading && sessions.map((session) => (
+          <div className="device-card" key={session.id}>
+            <span><HiComputerDesktop /></span>
+            <div><strong>{session.name || "Web browser"}</strong><p>{session.platform || "web"} · {session.isCurrent ? "Active now" : `Last active ${formatSessionTime(session.lastActiveAt)}`}{session.ip ? ` · ${session.ip}` : ""}</p></div>
+            {session.isCurrent ? <b>Current</b> : <button type="button" className="device-signout" onClick={() => revokeMutation.mutate(session.id)} disabled={revokeMutation.isPending}>Sign out</button>}
+          </div>
+        ))}
+        {!isLoading && !sessions.length && <p className="security-empty">No active sessions were found.</p>}
+      </div>
+      <button type="button" className="outline-danger" onClick={() => logoutOthersMutation.mutate()} disabled={!hasOtherSessions || logoutOthersMutation.isPending}>{logoutOthersMutation.isPending ? "Signing out…" : "Sign out of all other devices"}</button>
     </>
   );
+}
+
+function formatSessionTime(value) {
+  const elapsed = Math.max(0, Date.now() - new Date(value || 0).getTime());
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }

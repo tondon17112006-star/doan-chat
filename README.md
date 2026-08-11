@@ -38,3 +38,17 @@ and rotate every secret it contained.
 Uploaded files are stored under `server/uploads` in local development. Configure
 an object-storage adapter before using the project in a multi-instance production
 deployment.
+
+## Development checks
+
+Before opening a pull request, use the same checks as CI:
+
+```bash
+npm ci
+npm audit --omit=dev --audit-level=high
+npm test
+npm run build
+```
+
+The GitHub Actions workflow runs `npm ci`, `npm test`, and `npm run build` on
+Node.js 20 for every push and pull request. It uses no repository secrets.
