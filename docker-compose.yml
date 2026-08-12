@@ -22,14 +22,17 @@ services:
       dockerfile: server/Dockerfile
     restart: unless-stopped
     environment:
+      NODE_ENV: production
       PORT: 5000
-      CLIENT_URL: http://localhost:4173
-      MONGODB_URI: mongodb://mongo:27017/lumina
-      REDIS_URL: redis://redis:6379
-      JWT_ACCESS_SECRET: docker-access-secret-change-me
-      JWT_REFRESH_SECRET: docker-refresh-secret-change-me
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:4173}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/lumina}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET must be configured}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET must be configured}
     ports:
       - "5000:5000"
+    volumes:
+      - lumina_uploads:/app/server/uploads
     depends_on:
       - mongo
       - redis
@@ -47,3 +50,4 @@ services:
 volumes:
   lumina_mongo:
   lumina_redis:
+  lumina_uploads:

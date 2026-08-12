@@ -20,6 +20,7 @@ export default function CallsPage() {
       if (!call.conversationId || !call.peer?.id) throw new Error("This call no longer has an available conversation.");
       const conversation = await chatApi.conversation(call.conversationId);
       const payload = {
+        callId: crypto.randomUUID(),
         conversationId: conversation.id,
         participants: conversation.participants.filter((participantId) => String(participantId) !== String(user.id)),
         type: call.type === "video" ? "video" : "voice",
@@ -28,13 +29,12 @@ export default function CallsPage() {
         status: "calling",
         incoming: false,
       };
-      await socialApi.addCall(payload);
+      if (!getSocket()?.connected) throw new Error("Realtime is reconnecting. Please wait before starting a call.");
       return payload;
     },
     onMutate: () => setError(""),
     onSuccess: (call) => {
       setActiveCall(call);
-      getSocket()?.emit("call:start", call);
       queryClient.invalidateQueries({ queryKey: ["calls"] });
     },
     onError: (requestError) => setError(requestError.response?.data?.message || requestError.message || "Could not start this call."),

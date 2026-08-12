@@ -10,7 +10,9 @@ export default function AdminPage() {
   if (isLoading) return <PageFrame title="Admin dashboard"><div className="admin-loading" /></PageFrame>;
   if (isError) return <PageFrame title="Admin dashboard"><p className="calls-error" role="alert">{error.response?.data?.message || "Could not load dashboard data."}</p></PageFrame>;
   const totals = data?.totals || {};
-  const maxMessages = Math.max(...(data?.chart || []).map((item) => item.messages), 1);
+  const chart = data?.chart || [];
+  const hasMessageActivity = chart.some((point) => Number(point.messages) > 0);
+  const maxMessages = Math.max(...chart.map((item) => item.messages), 1);
   return (
     <PageFrame eyebrow="Workspace health" title="Admin dashboard" subtitle="A clear view of your community and platform activity.">
       <div className="admin-stat-grid">
@@ -22,11 +24,11 @@ export default function AdminPage() {
       <div className="admin-grid">
         <section className="admin-card chart-card">
           <div className="admin-card-header"><div><h2>Message activity</h2><p>Messages sent over the last 7 days</p></div></div>
-          <div className="bar-chart">
-            {(data?.chart || []).map((point) => (
+          {hasMessageActivity ? <div className="bar-chart">
+            {chart.map((point) => (
               <div className="bar-column" key={point.label}><span className="bar-tooltip">{point.messages}</span><i style={{ height: `${(point.messages / maxMessages) * 100}%` }} /><small>{point.label}</small></div>
             ))}
-          </div>
+          </div> : <p className="admin-empty">No message activity has been recorded in the last 7 days.</p>}
         </section>
         <section className="admin-card users-card">
           <div className="admin-card-header"><div><h2>Newest members</h2><p>Recently joined the community</p></div></div>

@@ -17,13 +17,18 @@ export function useRealtime() {
     const updateTimeline = (message) => {
       queryClient.setQueryData(["messages", message.conversationId], (previous) => {
         if (!previous) return previous;
-        if (previous.messages.some((item) => item.id === message.id)) return previous;
-        return { ...previous, messages: [...previous.messages, message] };
+        const existing = previous.messages.filter((item) => item.id !== message.id && item.clientMessageId !== message.clientMessageId);
+        return { ...previous, messages: [...existing, message].sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt)) };
       });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      if (document.hidden && Notification.permission === "granted") {
+      if (message.senderId !== useAuthStore.getState().user?.id && document.hidden && Notification.permission === "granted") {
         new Notification(message.sender?.username || "New message", { body: message.content || "Sent an attachment" });
       }
+    };
+    const seenTimeline = ({ conversationId, readAt }) => {
+      queryClient.setQueryData(["messages", conversationId], (previous) =>
+        previous ? { ...previous, messages: previous.messages.map((message) => message.senderId === useAuthStore.getState().user?.id ? { ...message, status: "read", readAt } : message) } : previous,
+      );
     };
     const editTimeline = (message) => {
       queryClient.setQueryData(["messages", message.conversationId], (previous) =>
@@ -43,6 +48,7 @@ export function useRealtime() {
     socket.on("message:edit", editTimeline);
     socket.on("message:delete", editTimeline);
     socket.on("reaction:update", editTimeline);
+    socket.on("message:seen", seenTimeline);
     socket.on("presence:update", presence);
     socket.on("group:update", () => queryClient.invalidateQueries({ queryKey: ["conversations"] }));
     socket.on("story:new", () => queryClient.invalidateQueries({ queryKey: ["stories"] }));
@@ -53,14 +59,31 @@ export function useRealtime() {
       queryClient.invalidateQueries({ queryKey: ["friend-requests"] });
     });
     socket.on("call:incoming", (call) => setActiveCall({ ...call, incoming: true, status: "ringing" }));
+    const refreshCalls = () => queryClient.invalidateQueries({ queryKey: ["calls"] });
+    const endCall = ({ callId } = {}) => {
+      const active = useUiStore.getState().activeCall;
+      if (!callId || active?.callId === callId) useUiStore.getState().setActiveCall(null);
+      refreshCalls();
+    };
+    socket.on("call:ended", endCall);
+    socket.on("call:timeout", endCall);
+    socket.on("call:unavailable", endCall);
+    socket.on("call:rejected", endCall);
+    socket.on("call:accepted", refreshCalls);
 
     return () => {
       socket.off("message:new", updateTimeline);
       socket.off("message:edit", editTimeline);
       socket.off("message:delete", editTimeline);
       socket.off("reaction:update", editTimeline);
+      socket.off("message:seen", seenTimeline);
       socket.off("presence:update", presence);
       socket.off("friend:update");
+      socket.off("call:ended", endCall);
+      socket.off("call:timeout", endCall);
+      socket.off("call:unavailable", endCall);
+      socket.off("call:rejected", endCall);
+      socket.off("call:accepted", refreshCalls);
       disconnectSocket();
     };
   }, [token, queryClient, setActiveCall]);

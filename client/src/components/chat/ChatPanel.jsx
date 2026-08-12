@@ -11,8 +11,9 @@ import {
   HiOutlineInformationCircle,
   HiSparkles
 } from "react-icons/hi2";
-import { chatApi, socialApi } from "../../services/api.js";
+import { chatApi } from "../../services/api.js";
 import { getSocket } from "../../services/socket.js";
+import { useSocketStatus } from "../../hooks/useSocketStatus.js";
 import { useAuthStore } from "../../store/authStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 import Avatar from "../common/Avatar.jsx";
@@ -31,8 +32,10 @@ export default function ChatPanel() {
   const detailOpen = useUiStore((state) => state.detailOpen);
   const toggleDetails = useUiStore((state) => state.toggleDetails);
   const setActiveCall = useUiStore((state) => state.setActiveCall);
+  const socketStatus = useSocketStatus();
   const [replyingTo, setReplyingTo] = useState(null);
   const [typingUsers, setTypingUsers] = useState([]);
+  const [realtimeError, setRealtimeError] = useState("");
   const { data: conversation, isLoading: conversationLoading } = useQuery({
     queryKey: ["conversation", conversationId],
     queryFn: () => chatApi.conversation(conversationId),
@@ -44,14 +47,47 @@ export default function ChatPanel() {
     enabled: Boolean(conversationId)
   });
   const sendMutation = useMutation({
-    mutationFn: (payload) => chatApi.send(conversationId, payload),
-    onSuccess: (message) => {
+    mutationFn: ({ payload }) => chatApi.send(conversationId, payload),
+    retry: (failureCount, error) => ![400, 401, 403, 404, 413, 422].includes(error?.response?.status) && failureCount < 2,
+    retryDelay: (attempt) => Math.min(600 * 2 ** attempt, 3_000),
+    onMutate: ({ clientMessageId, payload }) => {
+      const optimistic = {
+        id: clientMessageId,
+        clientMessageId,
+        conversationId,
+        senderId: user.id,
+        sender: user,
+        content: payload.content,
+        attachments: payload.attachments || [],
+        type: payload.type || "text",
+        replyTo: payload.replyTo || null,
+        reactions: [],
+        status: "sending",
+        createdAt: new Date().toISOString(),
+        _retryPayload: payload,
+      };
       queryClient.setQueryData(["messages", conversationId], (previous) => {
-        if (!previous || previous.messages.some((item) => item.id === message.id)) return previous;
-        return { ...previous, messages: [...previous.messages, message] };
+        if (!previous) return previous;
+        const messages = previous.messages.some((item) => item.clientMessageId === clientMessageId || item.id === clientMessageId)
+          ? previous.messages.map((item) => item.clientMessageId === clientMessageId || item.id === clientMessageId ? optimistic : item)
+          : [...previous.messages, optimistic];
+        return { ...previous, messages };
+      });
+      return { clientMessageId };
+    },
+    onSuccess: (message, { clientMessageId }) => {
+      queryClient.setQueryData(["messages", conversationId], (previous) => {
+        if (!previous) return previous;
+        const messages = previous.messages.filter((item) => item.id !== message.id && item.id !== clientMessageId && item.clientMessageId !== message.clientMessageId);
+        return { ...previous, messages: [...messages, message].sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt)) };
       });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
       setReplyingTo(null);
+    },
+    onError: (_error, { clientMessageId }) => {
+      queryClient.setQueryData(["messages", conversationId], (previous) =>
+        previous ? { ...previous, messages: previous.messages.map((message) => message.id === clientMessageId || message.clientMessageId === clientMessageId ? { ...message, status: "failed" } : message) } : previous,
+      );
     }
   });
 
@@ -80,8 +116,14 @@ export default function ChatPanel() {
   }, [conversationId, user.id]);
 
   async function startCall(type) {
+    const socket = getSocket();
+    if (!socket?.connected) {
+      setRealtimeError("Realtime is reconnecting. Please wait before starting a call.");
+      return;
+    }
     const participants = (conversation?.participants || []).filter((id) => String(id) !== user.id);
     const call = {
+      callId: crypto.randomUUID(),
       conversationId,
       participants,
       type,
@@ -91,8 +133,16 @@ export default function ChatPanel() {
       incoming: false
     };
     setActiveCall(call);
-    getSocket()?.emit("call:start", call);
-    socialApi.addCall(call).catch(() => undefined);
+  }
+
+  function queueMessage(payload, clientMessageId = crypto.randomUUID()) {
+    const request = { ...payload, clientMessageId };
+    return sendMutation.mutateAsync({ payload: request, clientMessageId }).catch(() => undefined);
+  }
+
+  function retryMessage(message) {
+    if (!message._retryPayload) return;
+    queueMessage(message._retryPayload, message.clientMessageId || message.id);
   }
 
   if (!conversationId) {
@@ -156,6 +206,8 @@ export default function ChatPanel() {
             <IconButton icon={<HiEllipsisHorizontal />} label="More options" className="desktop-more" />
           </div>
         </header>
+        {!socketStatus.connected && <p className="realtime-state" role="status">{socketStatus.reconnecting ? "Reconnecting realtime…" : "Realtime is offline. Failed messages can be retried."}</p>}
+        {realtimeError && <p className="realtime-state error" role="alert">{realtimeError}</p>}
 
         <MessageList
           conversation={conversation}
@@ -164,12 +216,13 @@ export default function ChatPanel() {
           user={user}
           typingUsers={typingUsers}
           onReply={setReplyingTo}
+          onRetry={retryMessage}
         />
         <Composer
           conversationId={conversationId}
           replyingTo={replyingTo}
           onCancelReply={() => setReplyingTo(null)}
-          onSend={(payload) => sendMutation.mutateAsync({ ...payload, replyTo: replyingTo?.id })}
+          onSend={(payload) => queueMessage({ ...payload, replyTo: replyingTo?.id })}
           sending={sendMutation.isPending}
         />
       </div>

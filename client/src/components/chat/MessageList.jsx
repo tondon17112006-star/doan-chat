@@ -5,7 +5,7 @@ import MessageBubble from "./MessageBubble.jsx";
 import Avatar from "../common/Avatar.jsx";
 import { groupByDay } from "../../utils/format.js";
 
-export default function MessageList({ conversation, messages, loading, user, typingUsers, onReply }) {
+export default function MessageList({ conversation, messages, loading, user, typingUsers, onReply, onRetry }) {
   const scrollRef = useRef(null);
   const bottomRef = useRef(null);
   const groups = useMemo(() => groupByDay(messages), [messages]);
@@ -62,6 +62,7 @@ export default function MessageList({ conversation, messages, loading, user, typ
                 compactTop={compactTop}
                 compactBottom={compactBottom}
                 onReply={onReply}
+                onRetry={onRetry}
               />
             );
           })}

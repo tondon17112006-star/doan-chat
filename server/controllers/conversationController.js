@@ -27,7 +27,7 @@ export const create = asyncHandler(async (request, response) => {
   if (request.body.type === "direct") {
     const targets = [...new Set((request.body.participants || []).map(String).filter((id) => id !== String(request.user.id)))];
     if (targets.length !== 1) throw new AppError("A direct conversation must contain exactly one other user.", 422);
-    if (isBlockedBetween(request.user.id, targets[0])) {
+    if (await isBlockedBetween(request.user.id, targets[0])) {
       throw new AppError("You cannot start a conversation with a user who has blocked you or whom you have blocked.", 403);
     }
   }

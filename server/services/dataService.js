@@ -1,18 +1,19 @@
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
-import mongoose from "mongoose";
 import { databaseReady } from "../config/database.js";
+import { env } from "../config/env.js";
 import { createSeedData } from "../data/seed.js";
+import { ensureMongoIndexes } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
 import { publicUser, unique } from "../utils/helpers.js";
+import * as mongoData from "./mongoDataService.js";
 
-const defaults = createSeedData();
-let users = defaults.users;
-let conversations = defaults.conversations;
-let messages = defaults.messages;
-let stories = defaults.stories;
-let notifications = defaults.notifications;
-let calls = defaults.calls;
+let users = [];
+let conversations = [];
+let messages = [];
+let stories = [];
+let notifications = [];
+let calls = [];
 let settings = new Map();
 let friendships = [];
 let blocks = [];
@@ -31,48 +32,25 @@ const defaultSettings = () => ({
   privacy: { readReceipts: true, lastSeen: "everyone", profilePhoto: "everyone" },
 });
 
-function collection(name) {
-  return mongoose.connection.db.collection(`lumina_${name}`);
-}
-
-function normalized(document) {
-  if (!document) return document;
-  const { _id, ...rest } = document;
-  return { ...rest, id: String(document.id || _id) };
-}
-
 async function persist(name, item) {
-  if (!databaseReady()) return;
-  const document = clone(item);
-  document._id = document.id;
-  await collection(name).replaceOne({ _id: document._id }, document, { upsert: true });
-}
-
-async function loadCollection(name, fallback) {
-  const items = await collection(name).find({}).toArray();
-  if (items.length) return items.map(normalized);
-  if (!fallback.length) return [];
-  await collection(name).insertMany(fallback.map((item) => ({ ...clone(item), _id: item.id })));
-  return clone(fallback);
+  // MongoDB writes use typed Mongoose models in mongoDataService. This path is
+  // deliberately a no-op for the in-memory demo store.
+  void name;
+  void item;
 }
 
 async function removePersisted(name, id) {
-  if (databaseReady()) await collection(name).deleteOne({ _id: String(id) });
+  void name;
+  void id;
 }
 
 export async function initializeDataService() {
-  if (!databaseReady()) return;
-  users = await loadCollection("users", defaults.users);
-  conversations = await loadCollection("conversations", defaults.conversations);
-  messages = await loadCollection("messages", defaults.messages);
-  stories = await loadCollection("stories", defaults.stories);
-  notifications = await loadCollection("notifications", defaults.notifications);
-  calls = await loadCollection("calls", defaults.calls);
-  friendships = await loadCollection("friendships", []);
-  blocks = await loadCollection("blocks", []);
-  uploads = await loadCollection("uploads", []);
-  const savedSettings = await collection("settings").find({}).toArray();
-  settings = new Map(savedSettings.map((item) => [String(item.id || item._id), normalized(item).value]));
+  if (databaseReady()) {
+    if (!env.isProduction) await ensureMongoIndexes();
+    return;
+  }
+  if (env.isProduction) return;
+  await resetMemoryData();
 }
 
 export async function resetMemoryData() {
@@ -90,16 +68,19 @@ export async function resetMemoryData() {
 }
 
 export async function findUserByEmail(email, withPassword = false) {
+  if (databaseReady()) return mongoData.findUserByEmail(email, withPassword);
   const user = users.find((item) => item.email.toLowerCase() === String(email || "").toLowerCase());
   return user ? (withPassword ? clone(user) : publicUser(user)) : null;
 }
 
 export async function findUserById(id) {
+  if (databaseReady()) return mongoData.findUserById(id);
   const user = users.find((item) => item.id === String(id));
   return user ? clone(user) : null;
 }
 
 export async function createUser(input) {
+  if (databaseReady()) return mongoData.createUser(input);
   const timestamp = now();
   const user = {
     id: makeId("u"),
@@ -123,10 +104,12 @@ export async function createUser(input) {
 }
 
 export async function compareUserPassword(user, password) {
+  if (databaseReady()) return mongoData.compareUserPassword(user, password);
   return Boolean(user?.passwordHash) && bcrypt.compare(String(password || ""), user.passwordHash);
 }
 
 export async function listUsers(query = "", currentUserId) {
+  if (databaseReady()) return mongoData.listUsers(query, currentUserId);
   const term = String(query || "").trim().toLowerCase();
   return users
     .filter((user) => user.id !== String(currentUserId) && user.role !== "assistant")
@@ -135,6 +118,7 @@ export async function listUsers(query = "", currentUserId) {
 }
 
 export async function updateUser(id, updates) {
+  if (databaseReady()) return mongoData.updateUser(id, updates);
   const index = users.findIndex((item) => item.id === String(id));
   if (index < 0) return null;
   users[index] = { ...users[index], ...updates, updatedAt: now() };
@@ -143,6 +127,7 @@ export async function updateUser(id, updates) {
 }
 
 export async function updatePassword(id, password) {
+  if (databaseReady()) return mongoData.updatePassword(id, password);
   const passwordHash = await bcrypt.hash(password, 10);
   return updateUser(id, { passwordHash, passwordChangedAt: now() });
 }
@@ -168,12 +153,17 @@ function latestFriendship(firstUserId, secondUserId) {
     .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0];
 }
 
-export function isBlockedBetween(firstUserId, secondUserId) {
+function memoryIsBlockedBetween(firstUserId, secondUserId) {
   return blocks.some(
     (record) =>
       (record.userId === String(firstUserId) && record.blockedUserId === String(secondUserId)) ||
       (record.userId === String(secondUserId) && record.blockedUserId === String(firstUserId)),
   );
+}
+
+export async function isBlockedBetween(firstUserId, secondUserId) {
+  if (databaseReady()) return mongoData.isBlockedBetween(firstUserId, secondUserId);
+  return memoryIsBlockedBetween(firstUserId, secondUserId);
 }
 
 function relationshipFor(currentUserId, targetUserId) {
@@ -199,6 +189,7 @@ function localUploadFilename(url) {
 }
 
 export async function assertUploadQuota(userId, incomingBytes) {
+  if (databaseReady()) return mongoData.assertUploadQuota(userId, incomingBytes);
   const usedBytes = uploads
     .filter((item) => item.ownerId === String(userId))
     .reduce((total, item) => total + Math.max(0, Number(item.size) || 0), 0);
@@ -208,6 +199,7 @@ export async function assertUploadQuota(userId, incomingBytes) {
 }
 
 export async function registerUploads(userId, files, purpose = "attachment") {
+  if (databaseReady()) return mongoData.registerUploads(userId, files, purpose);
   const timestamp = now();
   const records = files.map((file) => ({
     id: String(file.filename),
@@ -227,11 +219,13 @@ export async function registerUploads(userId, files, purpose = "attachment") {
 }
 
 export async function findUploadByFilename(filename) {
+  if (databaseReady()) return mongoData.findUploadByFilename(filename);
   const record = uploads.find((item) => item.filename === String(filename));
   return record ? clone(record) : null;
 }
 
 export async function canUserReadUpload(userId, filename) {
+  if (databaseReady()) return mongoData.canUserReadUpload(userId, filename);
   const record = uploads.find((item) => item.filename === String(filename));
   if (!record) return false;
   if (record.publicDemo || record.purpose === "avatar" || record.purpose === "story") return true;
@@ -243,11 +237,13 @@ export async function canUserReadUpload(userId, filename) {
 }
 
 export async function findPublicDemoUpload(filename) {
+  if (databaseReady()) return mongoData.findPublicDemoUpload(filename);
   const record = uploads.find((item) => item.filename === String(filename) && item.publicDemo === true);
   return record ? clone(record) : null;
 }
 
 export async function assertOwnedUploadPurpose(userId, url, purpose) {
+  if (databaseReady()) return mongoData.assertOwnedUploadPurpose(userId, url, purpose);
   const filename = localUploadFilename(url);
   if (!filename) return;
   const record = uploads.find((item) => item.filename === filename);
@@ -294,10 +290,11 @@ async function claimMessageAttachments(userId, conversationId, attachments) {
 }
 
 export async function isDirectConversationBlocked(conversationId, userId) {
+  if (databaseReady()) return mongoData.isDirectConversationBlocked(conversationId, userId);
   const conversation = conversations.find((item) => item.id === String(conversationId));
   if (!canAccess(conversation, userId)) return null;
   const peerId = directPeerId(conversation, userId);
-  return Boolean(peerId && isBlockedBetween(userId, peerId));
+  return Boolean(peerId && memoryIsBlockedBetween(userId, peerId));
 }
 
 function lastMessageFor(conversationId) {
@@ -337,6 +334,7 @@ function presentConversation(conversation, userId) {
 }
 
 export async function getConversations(userId) {
+  if (databaseReady()) return mongoData.getConversations(userId);
   return conversations
     .filter((conversation) => canAccess(conversation, userId) && !(conversation.deletedFor || []).includes(String(userId)))
     .map((conversation) => presentConversation(conversation, userId))
@@ -344,13 +342,15 @@ export async function getConversations(userId) {
 }
 
 export async function getConversation(id, userId) {
+  if (databaseReady()) return mongoData.getConversation(id, userId);
   const conversation = conversations.find((item) => item.id === String(id));
   return canAccess(conversation, userId) ? presentConversation(conversation, userId) : null;
 }
 
 export async function createConversation(userId, input) {
+  if (databaseReady()) return mongoData.createConversation(userId, input);
   const participantIds = unique([userId, ...(Array.isArray(input.participants) ? input.participants : [])]);
-  if (input.type === "direct" && participantIds.length === 2 && isBlockedBetween(participantIds[0], participantIds[1])) return null;
+  if (input.type === "direct" && participantIds.length === 2 && memoryIsBlockedBetween(participantIds[0], participantIds[1])) return null;
   if (input.type === "direct" && participantIds.length === 2) {
     const existing = conversations.find(
       (item) => item.type === "direct" && item.participants.length === 2 && participantIds.every((id) => item.participants.includes(id)),
@@ -388,6 +388,7 @@ function toggleMembership(list, userId, enabled) {
 }
 
 export async function updateConversation(id, userId, updates) {
+  if (databaseReady()) return mongoData.updateConversation(id, userId, updates);
   const index = conversations.findIndex((item) => item.id === String(id));
   if (index < 0 || !canAccess(conversations[index], userId)) return null;
   const conversation = conversations[index];
@@ -413,6 +414,7 @@ export async function updateConversation(id, userId, updates) {
 }
 
 export async function leaveConversation(id, userId) {
+  if (databaseReady()) return mongoData.leaveConversation(id, userId);
   const index = conversations.findIndex((item) => item.id === String(id));
   if (index < 0 || !canAccess(conversations[index], userId) || conversations[index].type !== "group") return null;
 
@@ -429,6 +431,7 @@ export async function leaveConversation(id, userId) {
 }
 
 export async function deleteConversationForUser(id, userId) {
+  if (databaseReady()) return mongoData.deleteConversationForUser(id, userId);
   const index = conversations.findIndex((item) => item.id === String(id));
   if (index < 0 || !canAccess(conversations[index], userId)) return null;
   const conversation = conversations[index];
@@ -439,6 +442,7 @@ export async function deleteConversationForUser(id, userId) {
 }
 
 export async function getMessages(conversationId, userId, before, limit = 60) {
+  if (databaseReady()) return mongoData.getMessages(conversationId, userId, before, limit);
   const conversation = conversations.find((item) => item.id === String(conversationId));
   if (!canAccess(conversation, userId)) return null;
   const pageSize = Math.min(Math.max(Number(limit) || 60, 1), 100);
@@ -452,15 +456,24 @@ export async function getMessages(conversationId, userId, before, limit = 60) {
 }
 
 export async function createMessage(userId, conversationId, input) {
+  if (databaseReady()) return mongoData.createMessage(userId, conversationId, input);
   const conversation = conversations.find((item) => item.id === String(conversationId));
   const peerId = directPeerId(conversation, userId);
-  if (!canAccess(conversation, userId) || (peerId && isBlockedBetween(userId, peerId))) return null;
+  if (!canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return null;
+  const clientMessageId = String(input.clientMessageId || "").slice(0, 120) || null;
+  const existing = clientMessageId && messages.find((message) =>
+    message.conversationId === String(conversationId)
+    && message.senderId === String(userId)
+    && message.clientMessageId === clientMessageId,
+  );
+  if (existing) return presentMessage(existing);
   const attachments = await claimMessageAttachments(userId, conversationId, input.attachments);
   const timestamp = now();
   const message = {
     id: makeId("m"),
     conversationId: String(conversationId),
     senderId: String(userId),
+    clientMessageId,
     type: input.type || (attachments[0]?.type?.split("/")[0] || "text"),
     content: input.content || "",
     attachments,
@@ -478,11 +491,21 @@ export async function createMessage(userId, conversationId, input) {
   return presentMessage(message);
 }
 
+export async function markMessageDelivered(id) {
+  if (databaseReady()) return mongoData.markMessageDelivered(id);
+  const message = messages.find((item) => item.id === String(id));
+  if (!message || message.status !== "sent") return message ? presentMessage(message) : null;
+  message.status = "delivered";
+  await persist("messages", message);
+  return presentMessage(message);
+}
+
 export async function updateMessage(id, userId, content) {
+  if (databaseReady()) return mongoData.updateMessage(id, userId, content);
   const message = messages.find((item) => item.id === String(id));
   const conversation = conversations.find((item) => item.id === message?.conversationId);
   const peerId = directPeerId(conversation, userId);
-  if (!message || !canAccess(conversation, userId) || (peerId && isBlockedBetween(userId, peerId)) || message.senderId !== String(userId) || message.unsentAt) return null;
+  if (!message || !canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId)) || message.senderId !== String(userId) || message.unsentAt) return null;
   message.content = content;
   message.editedAt = now();
   await persist("messages", message);
@@ -490,10 +513,11 @@ export async function updateMessage(id, userId, content) {
 }
 
 export async function deleteMessage(id, userId, everyone) {
+  if (databaseReady()) return mongoData.deleteMessage(id, userId, everyone);
   const message = messages.find((item) => item.id === String(id));
   const conversation = conversations.find((item) => item.id === message?.conversationId);
   const peerId = directPeerId(conversation, userId);
-  if (!message || !canAccess(conversation, userId) || (peerId && isBlockedBetween(userId, peerId))) return null;
+  if (!message || !canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return null;
   if (everyone && message.senderId === String(userId)) {
     message.content = "";
     message.attachments = [];
@@ -506,10 +530,11 @@ export async function deleteMessage(id, userId, everyone) {
 }
 
 export async function reactToMessage(id, userId, emoji) {
+  if (databaseReady()) return mongoData.reactToMessage(id, userId, emoji);
   const message = messages.find((item) => item.id === String(id));
   const conversation = conversations.find((item) => item.id === message?.conversationId);
   const peerId = directPeerId(conversation, userId);
-  if (!message || !canAccess(conversation, userId) || (peerId && isBlockedBetween(userId, peerId))) return null;
+  if (!message || !canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return null;
   for (const reaction of message.reactions || []) reaction.users = reaction.users.filter((idValue) => idValue !== String(userId));
   message.reactions = (message.reactions || []).filter((reaction) => reaction.users.length);
   if (emoji) {
@@ -525,19 +550,21 @@ export async function reactToMessage(id, userId, emoji) {
 }
 
 export async function togglePinnedMessage(id, userId) {
+  if (databaseReady()) return mongoData.togglePinnedMessage(id, userId);
   const message = messages.find((item) => item.id === String(id));
   const conversation = conversations.find((item) => item.id === message?.conversationId);
   const peerId = directPeerId(conversation, userId);
-  if (!message || !canAccess(conversation, userId) || (peerId && isBlockedBetween(userId, peerId))) return null;
+  if (!message || !canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return null;
   message.pinned = !message.pinned;
   await persist("messages", message);
   return presentMessage(message);
 }
 
 export async function markConversationRead(conversationId, userId) {
+  if (databaseReady()) return mongoData.markConversationRead(conversationId, userId);
   const conversation = conversations.find((item) => item.id === String(conversationId));
   const peerId = directPeerId(conversation, userId);
-  if (!canAccess(conversation, userId) || (peerId && isBlockedBetween(userId, peerId))) return false;
+  if (!canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return false;
   const changed = messages.filter((message) => message.conversationId === String(conversationId) && message.senderId !== String(userId));
   await Promise.all(changed.map(async (message) => {
     message.readBy = unique([...(message.readBy || []), userId]);
@@ -549,14 +576,16 @@ export async function markConversationRead(conversationId, userId) {
 }
 
 export async function getStories(userId) {
+  if (databaseReady()) return mongoData.getStories(userId);
   return stories
     .filter((story) => !story.expiresAt || new Date(story.expiresAt) > new Date())
-    .filter((story) => !isBlockedBetween(userId, story.userId))
+    .filter((story) => !memoryIsBlockedBetween(userId, story.userId))
     .map((story) => ({ ...clone(story), user: publicUser(users.find((user) => user.id === story.userId)) }))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
 export async function createStory(userId, input) {
+  if (databaseReady()) return mongoData.createStory(userId, input);
   const story = {
     id: makeId("s"),
     userId: String(userId),
@@ -574,8 +603,9 @@ export async function createStory(userId, input) {
 }
 
 export async function viewStory(id, userId, reaction) {
+  if (databaseReady()) return mongoData.viewStory(id, userId, reaction);
   const story = stories.find((item) => item.id === String(id));
-  if (!story || isBlockedBetween(userId, story.userId)) return null;
+  if (!story || memoryIsBlockedBetween(userId, story.userId)) return null;
   story.viewers = unique([...(story.viewers || []), userId]);
   if (reaction) story.reactions.push({ userId: String(userId), emoji: reaction, createdAt: now() });
   await persist("stories", story);
@@ -583,6 +613,7 @@ export async function viewStory(id, userId, reaction) {
 }
 
 export async function getNotifications(userId) {
+  if (databaseReady()) return mongoData.getNotifications(userId);
   return notifications
     .filter((item) => item.userId === String(userId))
     .map((item) => ({ ...clone(item), actor: publicUser(users.find((user) => user.id === item.actorId)) }))
@@ -590,6 +621,7 @@ export async function getNotifications(userId) {
 }
 
 export async function markNotificationsRead(userId) {
+  if (databaseReady()) return mongoData.markNotificationsRead(userId);
   const changed = notifications.filter((item) => item.userId === String(userId));
   await Promise.all(changed.map(async (item) => {
     item.read = true;
@@ -597,7 +629,26 @@ export async function markNotificationsRead(userId) {
   }));
 }
 
+export async function createRealtimeNotification(userId, actorId, input = {}) {
+  if (databaseReady()) return mongoData.createRealtimeNotification(userId, actorId, input);
+  const notification = {
+    id: makeId("n"),
+    userId: String(userId),
+    actorId: String(actorId),
+    type: String(input.type || "message").slice(0, 64),
+    title: String(input.title || "New activity").slice(0, 200),
+    body: String(input.body || "").slice(0, 500),
+    data: input.data && typeof input.data === "object" ? clone(input.data) : {},
+    read: false,
+    createdAt: now(),
+  };
+  notifications.push(notification);
+  await persist("notifications", notification);
+  return { ...clone(notification), actor: publicUser(users.find((item) => item.id === notification.actorId)) };
+}
+
 export async function getCalls(userId) {
+  if (databaseReady()) return mongoData.getCalls(userId);
   return calls
     .filter((item) => item.userId === String(userId))
     .map((item) => {
@@ -611,9 +662,10 @@ export async function getCalls(userId) {
 }
 
 export async function createCall(userId, input) {
+  if (databaseReady()) return mongoData.createCall(userId, input);
   const conversation = conversations.find((item) => item.id === String(input.conversationId));
   const directPeer = directPeerId(conversation, userId);
-  if (!canAccess(conversation, userId) || (directPeer && isBlockedBetween(userId, directPeer))) return null;
+  if (!canAccess(conversation, userId) || (directPeer && memoryIsBlockedBetween(userId, directPeer))) return null;
   const peerId = String(input.peer?.id || input.participants?.[0] || "");
   const call = {
     id: makeId("call"),
@@ -622,8 +674,10 @@ export async function createCall(userId, input) {
     conversationId: input.conversationId,
     type: input.type === "video" ? "video" : "voice",
     status: input.status || "ringing",
-    direction: "outgoing",
+    direction: input.direction === "incoming" ? "incoming" : "outgoing",
     duration: Number(input.duration || 0),
+    ...(input.answeredAt ? { answeredAt: input.answeredAt } : {}),
+    ...(input.endedAt ? { endedAt: input.endedAt } : {}),
     createdAt: now(),
   };
   calls.push(call);
@@ -631,13 +685,27 @@ export async function createCall(userId, input) {
   return { ...clone(call), peer: publicUser(users.find((user) => user.id === peerId)) };
 }
 
+export async function updateCall(id, updates = {}) {
+  if (databaseReady()) return mongoData.updateCall(id, updates);
+  const call = calls.find((item) => item.id === String(id));
+  if (!call) return null;
+  for (const key of ["status", "direction", "answeredAt", "endedAt"]) {
+    if (updates[key] !== undefined) call[key] = updates[key];
+  }
+  if (updates.duration !== undefined) call.duration = Math.max(0, Number(updates.duration) || 0);
+  await persist("calls", call);
+  return { ...clone(call), peer: publicUser(users.find((user) => user.id === call.peerId)) };
+}
+
 export async function listFriends(userId) {
+  if (databaseReady()) return mongoData.listFriends(userId);
   return users
     .filter((user) => user.id !== String(userId) && relationshipFor(userId, user.id) === "friends")
     .map((user) => ({ ...publicUser(user), relationship: "friends" }));
 }
 
 export async function listFriendRequests(userId, direction) {
+  if (databaseReady()) return mongoData.listFriendRequests(userId, direction);
   const requested = friendships
     .filter((record) => record.status === "pending")
     .filter((record) => (direction === "sent" ? record.requesterId === String(userId) : record.recipientId === String(userId)))
@@ -652,6 +720,7 @@ export async function listFriendRequests(userId, direction) {
 }
 
 export async function friendAction(userId, targetId, action) {
+  if (databaseReady()) return mongoData.friendAction(userId, targetId, action);
   const actorId = String(userId);
   const target = users.find((item) => item.id === String(targetId));
   if (!target) return null;
@@ -659,7 +728,7 @@ export async function friendAction(userId, targetId, action) {
 
   if (action === "block") return blockUser(actorId, target);
   if (action === "unblock") return unblockUser(actorId, target);
-  if (isBlockedBetween(actorId, target.id)) throw new AppError("This action is unavailable because one of you has blocked the other.", 403);
+  if (memoryIsBlockedBetween(actorId, target.id)) throw new AppError("This action is unavailable because one of you has blocked the other.", 403);
 
   if (action === "request") return sendFriendRequest(actorId, target);
   if (action === "accept" || action === "decline" || action === "cancel") return respondToFriendRequest(actorId, target, action);
@@ -776,6 +845,7 @@ function relationshipResult(action, actorId, target, friendship, notification = 
 }
 
 export async function searchEverything(userId, query) {
+  if (databaseReady()) return mongoData.searchEverything(userId, query);
   const term = String(query || "").trim().toLowerCase();
   if (term.length < 2) return { users: [], conversations: [], messages: [], files: [] };
   const accessible = conversations.filter((conversation) => canAccess(conversation, userId));
@@ -790,6 +860,7 @@ export async function searchEverything(userId, query) {
 }
 
 export async function getSettings(userId) {
+  if (databaseReady()) return mongoData.getSettings(userId);
   return clone(settings.get(String(userId)) || defaultSettings());
 }
 
@@ -801,6 +872,7 @@ function mergeSettings(current, updates) {
 }
 
 export async function updateSettings(userId, updates) {
+  if (databaseReady()) return mongoData.updateSettings(userId, updates);
   const id = String(userId);
   const value = mergeSettings(settings.get(id) || defaultSettings(), updates);
   settings.set(id, value);
@@ -809,6 +881,7 @@ export async function updateSettings(userId, updates) {
 }
 
 export async function adminStats() {
+  if (databaseReady()) return mongoData.adminStats();
   const formatter = new Intl.DateTimeFormat("en", { weekday: "short" });
   const days = Array.from({ length: 7 }, (_, index) => {
     const date = new Date();
@@ -839,6 +912,7 @@ export async function adminStats() {
 }
 
 export async function setUserPresence(userId, isOnline) {
+  if (databaseReady()) return mongoData.setUserPresence(userId, isOnline);
   const user = users.find((item) => item.id === String(userId));
   if (!user) return null;
   user.isOnline = isOnline;

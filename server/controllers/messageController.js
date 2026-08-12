@@ -2,10 +2,13 @@
 import { asyncHandler } from "../utils/asyncHandler.js";
 import {
   createMessage,
+  createRealtimeNotification,
   deleteMessage,
+  getConversation,
   getMessages,
   isDirectConversationBlocked,
   markConversationRead,
+  markMessageDelivered,
   reactToMessage,
   togglePinnedMessage,
   updateMessage,
@@ -14,6 +17,7 @@ import { generateAiReply } from "../services/aiService.js";
 import { AppError } from "../utils/AppError.js";
 import { cleanText } from "../utils/helpers.js";
 import { audit } from "../services/auditService.js";
+import { emitToUsers, onlineUserIds } from "../services/realtimeService.js";
 
 export const list = asyncHandler(async (request, response) => {
   const result = await getMessages(request.params.conversationId, request.user.id, request.query.before, request.query.limit);
@@ -33,10 +37,23 @@ export const create = asyncHandler(async (request, response) => {
   };
   const message = await createMessage(request.user.id, request.params.conversationId, input);
   if (!message) throw new AppError("Conversation not found.", 404);
-  request.app.get("io")?.to(`conversation:${request.params.conversationId}`).emit("message:new", message);
-  response.status(201).json({ success: true, data: message });
+  const io = request.app.get("io");
+  const conversation = await getConversation(request.params.conversationId, request.user.id);
+  const recipients = (conversation?.participants || []).map(String).filter((id) => id !== String(request.user.id));
+  const onlineRecipients = io ? await onlineUserIds(io, recipients) : [];
+  const delivered = onlineRecipients.length ? await markMessageDelivered(message.id) : message;
+  emitToUsers(io, [...recipients, request.user.id], "message:new", delivered || message);
+  for (const recipientId of recipients.filter((id) => !onlineRecipients.includes(id))) {
+    await createRealtimeNotification(recipientId, request.user.id, {
+      type: "message",
+      title: `New message from ${request.user.username}`,
+      body: message.content || "Sent an attachment",
+      data: { conversationId: request.params.conversationId, messageId: message.id },
+    });
+  }
+  response.status(201).json({ success: true, data: delivered || message });
 
-  if (request.params.conversationId === "c-ai") void replyAsLumina(request.app.get("io"), input.content);
+  if (request.params.conversationId === "c-ai") void replyAsLumina(io, input.content);
 });
 
 function normalizeAttachment(attachment) {
