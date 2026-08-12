@@ -6,7 +6,6 @@ import compression from "compression";
 import cookieParser from "cookie-parser";
 import mongoSanitize from "express-mongo-sanitize";
 import hpp from "hpp";
-import morgan from "morgan";
 import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import { env } from "./config/env.js";
@@ -15,11 +14,13 @@ import { apiRouter } from "./routes/index.js";
 import * as miscController from "./controllers/miscController.js";
 import { errorHandler, notFound } from "./middlewares/error.js";
 import { originGuard } from "./middlewares/security.js";
+import { structuredRequestLogger } from "./services/logger.js";
 
 export const app = express();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+app.use(structuredRequestLogger);
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -34,7 +35,6 @@ app.use(cookieParser());
 app.use(mongoSanitize());
 app.use(hpp());
 app.use(originGuard);
-app.use(morgan(env.isProduction ? "combined" : "dev"));
 app.use(
   "/api/auth",
   rateLimit({

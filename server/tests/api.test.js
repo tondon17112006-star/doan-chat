@@ -39,7 +39,23 @@ async function loginSession(agent, email = "alex@lumina.chat", password = "Passw
 describe("Lumina API", () => {
   it("reports service health", async () => {
     const response = await request(app).get("/api/health").expect(200);
-    expect(response.body).toMatchObject({ success: true, service: "lumina-api" });
+    expect(response.body).toMatchObject({ success: true, service: "lumina-api", status: "alive" });
+    expect(response.headers["x-request-id"]).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it("reports readiness for every configured dependency", async () => {
+    const response = await request(app).get("/api/ready");
+    expect([200, 503]).toContain(response.status);
+    expect(response.body).toMatchObject({
+      success: response.status === 200,
+      service: "lumina-api",
+      status: response.status === 200 ? "ready" : "not_ready",
+      checks: { mongo: expect.any(Object), redis: expect.any(Object) },
+    });
+    for (const check of Object.values(response.body.checks)) {
+      expect(check).toEqual(expect.objectContaining({ configured: expect.any(Boolean), ready: expect.any(Boolean), status: expect.any(String) }));
+      if (!check.configured) expect(check).toMatchObject({ ready: true, status: "not_configured" });
+    }
   });
 
   it("logs into the demo account and returns conversations", async () => {
@@ -254,6 +270,27 @@ describe("Lumina API", () => {
     expect(response.body.data).toMatchObject({ name: "Creative Circle", color: "orange" });
     expect(response.body.data.participants).toContain("u-maya");
     expect(response.body.data.admins).toEqual(["u-alex", "u-jordan"]);
+  });
+
+  it("allows a group admin to manage admins and remove a member", async () => {
+    const authorization = await login("alex@lumina.chat");
+    const promoted = await request(app)
+      .patch("/api/conversations/c-design")
+      .set("Authorization", authorization)
+      .send({ admins: ["u-alex", "u-jordan", "u-sofia"] })
+      .expect(200);
+    expect(promoted.body.data.admins).toEqual(["u-alex", "u-jordan", "u-sofia"]);
+
+    const updated = await request(app)
+      .patch("/api/conversations/c-design")
+      .set("Authorization", authorization)
+      .send({ participants: ["u-alex", "u-sofia", "u-minh"], admins: ["u-alex", "u-sofia"] })
+      .expect(200);
+    expect(updated.body.data.participants).not.toContain("u-jordan");
+    expect(updated.body.data.admins).toEqual(["u-alex", "u-sofia"]);
+
+    const removedMemberAuthorization = await login("jordan@lumina.chat");
+    await request(app).get("/api/conversations/c-design").set("Authorization", removedMemberAuthorization).expect(404);
   });
 
   it("blocks a normal group member from changing shared details but lets them change personal flags", async () => {

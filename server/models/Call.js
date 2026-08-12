@@ -1,20 +1,21 @@
 // File: server/models/Call.js
 import mongoose from "mongoose";
+import { createStringIdSchema } from "./modelHelpers.js";
 
-const callSchema = new mongoose.Schema(
+const callSchema = createStringIdSchema(
   {
-    conversation: { type: mongoose.Schema.Types.ObjectId, ref: "Conversation", index: true },
-    initiator: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    participants: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    userId: { type: String, required: true, index: true },
+    peerId: { type: String, required: true, index: true },
+    conversationId: { type: String, default: null, index: true },
     type: { type: String, enum: ["voice", "video"], required: true },
     status: { type: String, enum: ["ringing", "accepted", "rejected", "missed", "ended"], default: "ringing" },
-    startedAt: { type: Date, default: Date.now },
+    direction: { type: String, enum: ["incoming", "outgoing"], default: "outgoing" },
+    duration: { type: Number, min: 0, default: 0 },
     answeredAt: Date,
     endedAt: Date,
-    duration: { type: Number, default: 0 },
   },
-  { timestamps: true },
+  { collection: "lumina_calls" },
 );
 
-callSchema.index({ participants: 1, createdAt: -1 });
+callSchema.index({ userId: 1, createdAt: -1 });
 export const Call = mongoose.models.Call || mongoose.model("Call", callSchema);

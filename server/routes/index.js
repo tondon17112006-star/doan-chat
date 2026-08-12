@@ -14,6 +14,7 @@ import { forgotPasswordRateLimits, loginRateLimits } from "../middlewares/authRa
 export const apiRouter = Router();
 
 apiRouter.get("/health", miscController.health);
+apiRouter.get("/ready", miscController.readiness);
 
 apiRouter.post(
   "/auth/register",

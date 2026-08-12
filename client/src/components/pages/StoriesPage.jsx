@@ -17,7 +17,7 @@ export default function StoriesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const setStory = useUiStore((state) => state.setStory);
   const user = useAuthStore((state) => state.user);
-  const { data: stories = [], isLoading } = useQuery({ queryKey: ["stories"], queryFn: socialApi.stories });
+  const { data: stories = [], isLoading, isError, error } = useQuery({ queryKey: ["stories"], queryFn: socialApi.stories });
 
   useEffect(() => {
     if (searchParams.get("create") === "true") {
@@ -44,7 +44,7 @@ export default function StoriesPage() {
       <section className="stories-gallery">
         <div className="section-title-row"><div><span className="section-icon violet"><HiPhoto /></span><div><h2>Recent stories</h2><p>{stories.length} updates from your circle</p></div></div></div>
         <div className="story-card-grid">
-          {isLoading ? Array.from({ length: 3 }, (_, index) => <div className="story-tile skeleton" key={index} />) : stories.map((story, index) => (
+          {isLoading ? Array.from({ length: 3 }, (_, index) => <div className="story-tile skeleton" key={index} />) : isError ? <p className="stories-empty" role="alert">{error.response?.data?.message || "Could not load stories."}</p> : !stories.length ? <p className="stories-empty">There are no stories to view yet.</p> : stories.map((story, index) => (
             <motion.button
               type="button"
               key={story.id}

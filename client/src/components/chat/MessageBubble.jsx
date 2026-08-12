@@ -26,7 +26,7 @@ import { SecureImage, SecureVideo, downloadPrivateUpload, usePrivateUploadUrl } 
 
 const reactionChoices = ["👍", "❤️", "😂", "😮", "😢", "😡"];
 
-export default function MessageBubble({ message, mine, compactTop, compactBottom, onReply }) {
+export default function MessageBubble({ message, mine, compactTop, compactBottom, onReply, onRetry }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [reactionsOpen, setReactionsOpen] = useState(false);
   const [bookmarked, setBookmarked] = useState(false);
@@ -115,7 +115,7 @@ export default function MessageBubble({ message, mine, compactTop, compactBottom
             {message.reactions.map((reaction) => <span key={reaction.emoji} title={`${reaction.users.length} reaction${reaction.users.length > 1 ? "s" : ""}`}>{reaction.emoji}<b>{reaction.users.length}</b></span>)}
           </div>
         ) : null}
-        {mine && !compactBottom && <StatusLine message={message} />}
+        {mine && !compactBottom && <StatusLine message={message} onRetry={() => onRetry?.(message)} />}
       </div>
     </motion.div>
   );
@@ -167,11 +167,11 @@ function VoiceMessage({ attachment }) {
   );
 }
 
-function StatusLine({ message }) {
+function StatusLine({ message, onRetry }) {
   return (
     <span className="message-status">
       {message.status === "sending" && "Sending…"}
-      {message.status === "failed" && "Failed"}
+      {message.status === "failed" && <><span>Failed</span><button type="button" onClick={onRetry}>Retry</button></>}
       {message.status === "sent" && <><HiCheck /> Sent</>}
       {message.status === "delivered" && <><HiCheckCircle /> Delivered</>}
       {message.status === "read" && <>Seen {message.readAt ? formatMessageTime(message.readAt) : ""}</>}

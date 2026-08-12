@@ -2,6 +2,7 @@
 import multer from "multer";
 import { unlink } from "node:fs/promises";
 import { env } from "../config/env.js";
+import { logError, logWarning, requestErrorFields } from "../services/logger.js";
 
 export function notFound(request, response) {
   response.status(404).json({ success: false, message: `Route ${request.method} ${request.originalUrl} was not found.` });
@@ -29,7 +30,9 @@ export async function errorHandler(error, request, response, _next) {
     statusCode = 422;
     message = Object.values(error.errors).map((item) => item.message).join(", ");
   }
-  if (!env.isProduction && statusCode >= 500) console.error(error);
+  const logFields = requestErrorFields(error, request, statusCode);
+  if (statusCode >= 500) logError("http_request_error", logFields);
+  else logWarning("http_request_error", logFields);
   response.status(statusCode).json({
     success: false,
     message,

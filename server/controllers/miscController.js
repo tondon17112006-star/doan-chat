@@ -15,6 +15,7 @@ import {
   updateSettings,
 } from "../services/dataService.js";
 import { audit } from "../services/auditService.js";
+import { readinessStatus } from "../services/healthService.js";
 import { safeOriginalName, uploadDirectory, validateUploadedFile } from "../middlewares/upload.js";
 import { AppError } from "../utils/AppError.js";
 
@@ -108,5 +109,16 @@ export const dashboard = asyncHandler(async (_request, response) => {
 });
 
 export const health = (_request, response) => {
-  response.json({ success: true, service: "lumina-api", timestamp: new Date().toISOString() });
+  response.json({ success: true, service: "lumina-api", status: "alive", timestamp: new Date().toISOString() });
 };
+
+export const readiness = asyncHandler(async (_request, response) => {
+  const result = await readinessStatus();
+  response.status(result.ready ? 200 : 503).json({
+    success: result.ready,
+    service: "lumina-api",
+    status: result.ready ? "ready" : "not_ready",
+    checks: result.checks,
+    timestamp: new Date().toISOString(),
+  });
+});

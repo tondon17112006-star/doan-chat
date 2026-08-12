@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import { env } from "../config/env.js";
+import { databaseReady } from "../config/database.js";
 import { redisClient } from "../config/redis.js";
+import { RefreshSession } from "../models/RefreshSession.js";
 import { AppError } from "../utils/AppError.js";
 import { publicUser } from "../utils/helpers.js";
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../utils/tokens.js";
@@ -26,6 +28,10 @@ const sessionKey = (sessionId) => `auth:session:${sessionId}`;
 const userSessionsKey = (userId) => `auth:sessions:${userId}`;
 const otpKey = (email, purpose) => `otp:${email}:${purpose}`;
 
+function sessionExpiry() {
+  return new Date(Date.now() + refreshTtlSeconds() * 1_000);
+}
+
 function refreshSessionId(token) {
   if (!token) return null;
   try {
@@ -37,6 +43,13 @@ function refreshSessionId(token) {
 
 async function storeSession(session) {
   sessions.set(session.id, session);
+  if (databaseReady()) {
+    await RefreshSession.findByIdAndUpdate(
+      session.id,
+      { $set: { userId: session.userId, deviceId: session.deviceId, name: session.name, platform: session.platform, ip: session.ip || "", userAgent: session.userAgent || "", remember: session.remember, lastActiveAt: session.lastActiveAt, expiresAt: session.expiresAt, revokedAt: null } },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
+    );
+  }
   const redis = redisClient();
   if (!redis) return;
   const ttl = refreshTtlSeconds();
@@ -50,26 +63,36 @@ async function storeSession(session) {
 
 async function readSession(sessionId) {
   const redis = redisClient();
-  if (!redis) return sessions.get(String(sessionId)) || null;
-  const cached = await redis.get(sessionKey(sessionId));
-  if (!cached) {
-    sessions.delete(String(sessionId));
-    return null;
+  if (redis) {
+    const cached = await redis.get(sessionKey(sessionId));
+    if (cached) {
+      try {
+        const session = JSON.parse(cached);
+        sessions.set(session.id, session);
+        return session;
+      } catch {
+        await redis.del(sessionKey(sessionId));
+      }
+    }
   }
-  try {
-    const session = JSON.parse(cached);
+  if (databaseReady()) {
+    const stored = await RefreshSession.findOne({ _id: String(sessionId), revokedAt: null, expiresAt: { $gt: new Date() } }).lean();
+    if (!stored) {
+      sessions.delete(String(sessionId));
+      return null;
+    }
+    const session = { ...stored, id: String(stored._id) };
     sessions.set(session.id, session);
     return session;
-  } catch {
-    await redis.del(sessionKey(sessionId));
-    return null;
   }
+  return sessions.get(String(sessionId)) || null;
 }
 
 async function removeSession(sessionId, userId) {
   const id = String(sessionId);
   const known = await readSession(id);
   sessions.delete(id);
+  if (databaseReady()) await RefreshSession.updateOne({ _id: id, ...(userId ? { userId: String(userId) } : {}) }, { $set: { revokedAt: new Date() } });
   const redis = redisClient();
   if (redis) {
     const ownerId = String(known?.userId || userId || "");
@@ -84,6 +107,15 @@ async function consumeSession(sessionId) {
   const id = String(sessionId);
   const redis = redisClient();
   if (!redis) {
+    if (databaseReady()) {
+      const stored = await RefreshSession.findOneAndUpdate(
+        { _id: id, revokedAt: null, expiresAt: { $gt: new Date() } },
+        { $set: { revokedAt: new Date() } },
+        { new: false },
+      ).lean();
+      sessions.delete(id);
+      return stored ? { ...stored, id: String(stored._id) } : null;
+    }
     const session = sessions.get(id) || null;
     sessions.delete(id);
     return session;
@@ -94,9 +126,18 @@ async function consumeSession(sessionId) {
     sessionKey(id),
   );
   sessions.delete(id);
-  if (!cached) return null;
+  if (!cached) {
+    if (!databaseReady()) return null;
+    const stored = await RefreshSession.findOneAndUpdate(
+      { _id: id, revokedAt: null, expiresAt: { $gt: new Date() } },
+      { $set: { revokedAt: new Date() } },
+      { new: false },
+    ).lean();
+    return stored ? { ...stored, id: String(stored._id) } : null;
+  }
   try {
     const session = JSON.parse(cached);
+    if (databaseReady()) await RefreshSession.updateOne({ _id: id }, { $set: { revokedAt: new Date() } });
     await redis.srem(userSessionsKey(session.userId), id);
     return session;
   } catch {
@@ -107,7 +148,13 @@ async function consumeSession(sessionId) {
 async function sessionsForUser(userId) {
   const id = String(userId);
   const redis = redisClient();
-  if (!redis) return [...sessions.values()].filter((session) => session.userId === id);
+  if (!redis) {
+    if (databaseReady()) {
+      const stored = await RefreshSession.find({ userId: id, revokedAt: null, expiresAt: { $gt: new Date() } }).lean();
+      return stored.map((session) => ({ ...session, id: String(session._id) }));
+    }
+    return [...sessions.values()].filter((session) => session.userId === id);
+  }
   const sessionIds = await redis.smembers(userSessionsKey(id));
   const stored = await Promise.all(sessionIds.map((sessionId) => readSession(sessionId)));
   const active = stored.filter((session) => session?.userId === id);
@@ -137,6 +184,7 @@ async function sessionResult(user, request, previousSession = null, previousSess
     remember: request.body?.remember ?? previousSession?.remember ?? true,
     lastActiveAt: now(),
     createdAt: previousSession?.createdAt || now(),
+    expiresAt: sessionExpiry(),
   };
   await storeSession(session);
   return {
