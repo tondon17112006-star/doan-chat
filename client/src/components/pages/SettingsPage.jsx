@@ -35,10 +35,11 @@ export default function SettingsPage() {
   const patchUser = useAuthStore((state) => state.patchUser);
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
-  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: socialApi.settings });
+  const { data: settings, isLoading: settingsLoading, isError: settingsIsError, error: settingsQueryError } = useQuery({ queryKey: ["settings"], queryFn: socialApi.settings });
   const [form, setForm] = useState({ username: user.username, bio: user.bio || "", status: user.status || "", location: user.location || "" });
   const [prefs, setPrefs] = useState(null);
   const [profileError, setProfileError] = useState("");
+  const [settingsError, setSettingsError] = useState("");
   const avatarInputRef = useRef(null);
   const profileMutation = useMutation({
     mutationFn: socialApi.updateProfile,
@@ -63,7 +64,13 @@ export default function SettingsPage() {
   });
   const settingsMutation = useMutation({
     mutationFn: socialApi.saveSettings,
-    onSuccess: flashSaved
+    onMutate: () => setSettingsError(""),
+    onSuccess: (updated) => {
+      setPrefs(updated);
+      queryClient.setQueryData(["settings"], updated);
+      flashSaved();
+    },
+    onError: (requestError) => setSettingsError(requestError.response?.data?.message || "Could not save your settings."),
   });
 
   useEffect(() => setPrefs(settings), [settings]);
@@ -91,6 +98,8 @@ export default function SettingsPage() {
           {nav.map((item) => <button key={item.id} type="button" className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>{item.icon}{item.label}</button>)}
         </nav>
         <section className="settings-panel">
+          {settingsLoading && <p className="settings-loading" role="status">Loading your settings…</p>}
+          {(settingsIsError || settingsError) && <p className="settings-error" role="alert">{settingsError || settingsQueryError?.response?.data?.message || "Could not load your settings."}</p>}
           {section === "profile" && (
             <>
               <SettingsHeading title="Your profile" subtitle="This is how you appear to people on Lumina." />
@@ -105,12 +114,12 @@ export default function SettingsPage() {
               <SaveBar saved={saved} pending={profileMutation.isPending} onSave={() => profileMutation.mutate(form)} />
             </>
           )}
-          {section === "appearance" && (
+          {section === "appearance" && prefs && (
             <>
               <SettingsHeading title="Appearance" subtitle="Choose how Lumina looks on this device." />
               <div className="theme-cards">
                 {[["light", "Light", <HiSun />], ["dark", "Dark", <HiMoon />], ["system", "System", <HiComputerDesktop />]].map(([id, label, icon]) => (
-                  <button key={id} type="button" className={theme === id ? "active" : ""} onClick={() => { setTheme(id); socialApi.saveSettings({ theme: id }); }}>
+                  <button key={id} type="button" className={theme === id ? "active" : ""} onClick={() => { setTheme(id); setPrefs({ ...prefs, theme: id }); settingsMutation.mutate({ theme: id }); }}>
                     <span className={`theme-preview preview-${id}`}><i /><i /><b /></span>
                     <span>{icon}{label}{theme === id && <HiCheck />}</span>
                   </button>
@@ -141,10 +150,11 @@ export default function SettingsPage() {
             </>
           )}
           {section === "security" && <SecuritySettings />}
-          {section === "language" && (
+          {section === "language" && prefs && (
             <>
               <SettingsHeading title="Language & region" subtitle="Choose the language used throughout Lumina." />
-              <SelectRow title="Display language" value={prefs?.language || "en"} options={[["en", "English"], ["vi", "Tiếng Việt"], ["es", "Español"], ["fr", "Français"]]} onChange={(value) => settingsMutation.mutate({ language: value })} />
+              <SelectRow title="Display language" value={prefs.language || "en"} options={[["en", "English"], ["vi", "Tiếng Việt"], ["es", "Español"], ["fr", "Français"]]} onChange={(value) => { setPrefs({ ...prefs, language: value }); settingsMutation.mutate({ language: value }); }} />
+              <p className="settings-note">The preference is saved now. Full interface translation is not available yet.</p>
             </>
           )}
         </section>

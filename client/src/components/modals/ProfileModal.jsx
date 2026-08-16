@@ -8,6 +8,7 @@ import { useAuthStore } from "../../store/authStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 import { authApi, chatApi, socialApi } from "../../services/api.js";
 import { disconnectSocket } from "../../services/socket.js";
+import { usePrivateUploadUrl } from "../../hooks/usePrivateUploadUrl.jsx";
 
 export default function ProfileModal() {
   const open = useUiStore((state) => state.profileOpen);
@@ -19,6 +20,8 @@ export default function ProfileModal() {
   const [form, setForm] = useState({ username: user.username, bio: user.bio || "", status: user.status || "", location: user.location || "" });
   const [error, setError] = useState("");
   const avatarInputRef = useRef(null);
+  const coverInputRef = useRef(null);
+  const coverPhoto = usePrivateUploadUrl(user.coverPhoto);
   const mutation = useMutation({
     mutationFn: socialApi.updateProfile,
     onSuccess: (updated) => {
@@ -35,6 +38,15 @@ export default function ProfileModal() {
     onMutate: () => setError(""),
     onSuccess: patchUser,
     onError: (requestError) => setError(requestError.response?.data?.message || "Could not upload your profile photo."),
+  });
+  const coverMutation = useMutation({
+    mutationFn: async (file) => {
+      const [uploaded] = await chatApi.upload([file], "avatar");
+      return socialApi.updateProfile({ coverPhoto: uploaded.url });
+    },
+    onMutate: () => setError(""),
+    onSuccess: patchUser,
+    onError: (requestError) => setError(requestError.response?.data?.message || "Could not upload your cover photo."),
   });
   useEffect(() => setForm({ username: user.username, bio: user.bio || "", status: user.status || "", location: user.location || "" }), [user]);
 
@@ -54,11 +66,21 @@ export default function ProfileModal() {
     avatarMutation.mutate(file);
   }
 
+  function chooseCover(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return setError("Choose an image file for your cover photo.");
+    if (file.size > 10 * 1024 * 1024) return setError("Your cover photo must be 10 MB or smaller.");
+    coverMutation.mutate(file);
+  }
+
   return (
     <Modal open={open} onClose={() => setOpen(false)} size="sm" className="profile-modal-card">
-      <div className="profile-cover">
+      <div className="profile-cover" style={coverPhoto ? { backgroundImage: `url("${coverPhoto}")` } : undefined}>
         <div className="cover-glow" />
-        <button type="button" aria-label="Change cover"><HiCamera /></button>
+        <input ref={coverInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onChange={chooseCover} />
+        <button type="button" aria-label="Change cover" onClick={() => coverInputRef.current?.click()} disabled={coverMutation.isPending}><HiCamera /></button>
       </div>
       <div className="profile-modal-body">
         <div className="profile-avatar-wrap"><Avatar user={user} size="xxl" online /><input ref={avatarInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onChange={chooseAvatar} /><button type="button" aria-label="Change profile photo" onClick={() => avatarInputRef.current?.click()} disabled={avatarMutation.isPending}><HiCamera /></button></div>

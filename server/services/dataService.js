@@ -18,6 +18,7 @@ let settings = new Map();
 let friendships = [];
 let blocks = [];
 let uploads = [];
+let reports = [];
 
 export const USER_UPLOAD_QUOTA_BYTES = 250 * 1024 * 1024;
 
@@ -65,6 +66,7 @@ export async function resetMemoryData() {
   friendships = [];
   blocks = [];
   uploads = [];
+  reports = [];
 }
 
 export async function findUserByEmail(email, withPassword = false) {
@@ -114,7 +116,13 @@ export async function listUsers(query = "", currentUserId) {
   return users
     .filter((user) => user.id !== String(currentUserId) && user.role !== "assistant")
     .filter((user) => !term || `${user.username} ${user.email} ${user.location}`.toLowerCase().includes(term))
-    .map((user) => ({ ...publicUser(user), relationship: relationshipFor(currentUserId, user.id) }));
+    .map((user) => ({ ...presentUserForViewer(user, currentUserId), relationship: relationshipFor(currentUserId, user.id) }));
+}
+
+export async function getUserProfile(id, viewerId) {
+  if (databaseReady()) return mongoData.getUserProfile(id, viewerId);
+  const user = users.find((item) => item.id === String(id));
+  return user ? presentUserForViewer(user, viewerId) : null;
 }
 
 export async function updateUser(id, updates) {
@@ -132,8 +140,35 @@ export async function updatePassword(id, password) {
   return updateUser(id, { passwordHash, passwordChangedAt: now() });
 }
 
-function userMap(ids) {
-  return ids.map((id) => users.find((user) => user.id === String(id))).filter(Boolean).map(publicUser);
+function userMap(ids, viewerId) {
+  return ids.map((id) => users.find((user) => user.id === String(id))).filter(Boolean).map((user) => presentUserForViewer(user, viewerId));
+}
+
+function privacySettingsFor(userId) {
+  return settings.get(String(userId)) || defaultSettings();
+}
+
+function canViewPrivacySetting(viewerId, targetId, setting) {
+  if (String(viewerId) === String(targetId)) return true;
+  if (setting === "everyone") return true;
+  if (setting === "friends") return relationshipFor(viewerId, targetId) === "friends";
+  return false;
+}
+
+function presentUserForViewer(user, viewerId) {
+  const result = publicUser(user);
+  if (!result || String(result.id) === String(viewerId)) return result;
+  const privacy = privacySettingsFor(result.id).privacy || defaultSettings().privacy;
+  if (!canViewPrivacySetting(viewerId, result.id, privacy.profilePhoto)) {
+    result.avatar = "";
+    result.coverPhoto = "";
+  }
+  if (!canViewPrivacySetting(viewerId, result.id, privacy.lastSeen)) result.lastSeen = null;
+  return result;
+}
+
+function readReceiptVisibleTo(viewerId, readerId) {
+  return String(viewerId) === String(readerId) || privacySettingsFor(readerId).privacy?.readReceipts !== false;
 }
 
 function canAccess(conversation, userId) {
@@ -228,8 +263,9 @@ export async function canUserReadUpload(userId, filename) {
   if (databaseReady()) return mongoData.canUserReadUpload(userId, filename);
   const record = uploads.find((item) => item.filename === String(filename));
   if (!record) return false;
-  if (record.publicDemo || record.purpose === "avatar" || record.purpose === "story") return true;
+  if (record.publicDemo || record.purpose === "story") return true;
   if (record.ownerId === String(userId)) return true;
+  if (record.purpose === "avatar") return canViewPrivacySetting(userId, record.ownerId, privacySettingsFor(record.ownerId).privacy?.profilePhoto);
   return (record.conversationIds || []).some((conversationId) => {
     const conversation = conversations.find((item) => item.id === String(conversationId));
     return canAccess(conversation, userId);
@@ -303,16 +339,23 @@ function lastMessageFor(conversationId) {
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
 }
 
-function presentMessage(message) {
+function presentMessage(message, viewerId) {
+  const value = clone(message);
+  const visibleReadBy = (value.readBy || []).filter((readerId) => readReceiptVisibleTo(viewerId, readerId));
+  if (value.status === "read" && String(value.senderId) === String(viewerId) && !visibleReadBy.some((readerId) => String(readerId) !== String(value.senderId))) {
+    value.status = "delivered";
+    delete value.readAt;
+  }
   return {
-    ...clone(message),
-    conversation: message.conversationId,
-    sender: publicUser(users.find((user) => user.id === message.senderId)),
+    ...value,
+    readBy: visibleReadBy,
+    conversation: value.conversationId,
+    sender: presentUserForViewer(users.find((user) => user.id === value.senderId), viewerId),
   };
 }
 
 function presentConversation(conversation, userId) {
-  const participantUsers = userMap(conversation.participants);
+  const participantUsers = userMap(conversation.participants, userId);
   const other = participantUsers.find((user) => user.id !== String(userId));
   const latest = lastMessageFor(conversation.id);
   const unreadCount = messages.filter(
@@ -425,6 +468,15 @@ export async function leaveConversation(id, userId) {
     const successor = participants.includes(String(conversation.createdBy)) ? String(conversation.createdBy) : participants[0];
     admins = [successor];
   }
+  if (!participants.length) {
+    conversations.splice(index, 1);
+    messages = messages.filter((message) => message.conversationId !== String(id));
+    uploads = uploads.map((upload) => ({
+      ...upload,
+      conversationIds: (upload.conversationIds || []).filter((conversationId) => String(conversationId) !== String(id)),
+    }));
+    return { id: String(id), participants: [], admins: [], deleted: true };
+  }
   conversations[index] = { ...conversation, participants, admins, updatedAt: now() };
   await persist("conversations", conversations[index]);
   return clone(conversations[index]);
@@ -451,7 +503,7 @@ export async function getMessages(conversationId, userId, before, limit = 60) {
     .filter((message) => !(message.deletedFor || []).includes(String(userId)))
     .filter((message) => !before || new Date(message.createdAt) < new Date(before))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  const page = filtered.slice(0, pageSize).reverse().map(presentMessage);
+  const page = filtered.slice(0, pageSize).reverse().map((message) => presentMessage(message, userId));
   return { messages: page, nextCursor: filtered.length > pageSize ? page[0]?.createdAt : null };
 }
 
@@ -466,7 +518,7 @@ export async function createMessage(userId, conversationId, input) {
     && message.senderId === String(userId)
     && message.clientMessageId === clientMessageId,
   );
-  if (existing) return presentMessage(existing);
+  if (existing) return presentMessage(existing, userId);
   const attachments = await claimMessageAttachments(userId, conversationId, input.attachments);
   const timestamp = now();
   const message = {
@@ -488,16 +540,16 @@ export async function createMessage(userId, conversationId, input) {
   messages.push(message);
   conversation.lastMessageAt = timestamp;
   await Promise.all([persist("messages", message), persist("conversations", conversation)]);
-  return presentMessage(message);
+  return presentMessage(message, userId);
 }
 
 export async function markMessageDelivered(id) {
   if (databaseReady()) return mongoData.markMessageDelivered(id);
   const message = messages.find((item) => item.id === String(id));
-  if (!message || message.status !== "sent") return message ? presentMessage(message) : null;
+  if (!message || message.status !== "sent") return message ? presentMessage(message, message.senderId) : null;
   message.status = "delivered";
   await persist("messages", message);
-  return presentMessage(message);
+  return presentMessage(message, message.senderId);
 }
 
 export async function updateMessage(id, userId, content) {
@@ -509,7 +561,7 @@ export async function updateMessage(id, userId, content) {
   message.content = content;
   message.editedAt = now();
   await persist("messages", message);
-  return presentMessage(message);
+  return presentMessage(message, userId);
 }
 
 export async function deleteMessage(id, userId, everyone) {
@@ -526,7 +578,7 @@ export async function deleteMessage(id, userId, everyone) {
     message.deletedFor = unique([...(message.deletedFor || []), userId]);
   }
   await persist("messages", message);
-  return presentMessage(message);
+  return presentMessage(message, userId);
 }
 
 export async function reactToMessage(id, userId, emoji) {
@@ -546,7 +598,7 @@ export async function reactToMessage(id, userId, emoji) {
     reaction.users.push(String(userId));
   }
   await persist("messages", message);
-  return presentMessage(message);
+  return presentMessage(message, userId);
 }
 
 export async function togglePinnedMessage(id, userId) {
@@ -557,14 +609,14 @@ export async function togglePinnedMessage(id, userId) {
   if (!message || !canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return null;
   message.pinned = !message.pinned;
   await persist("messages", message);
-  return presentMessage(message);
+  return presentMessage(message, userId);
 }
 
 export async function markConversationRead(conversationId, userId) {
   if (databaseReady()) return mongoData.markConversationRead(conversationId, userId);
   const conversation = conversations.find((item) => item.id === String(conversationId));
   const peerId = directPeerId(conversation, userId);
-  if (!canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return false;
+  if (!canAccess(conversation, userId) || (peerId && memoryIsBlockedBetween(userId, peerId))) return null;
   const changed = messages.filter((message) => message.conversationId === String(conversationId) && message.senderId !== String(userId));
   await Promise.all(changed.map(async (message) => {
     message.readBy = unique([...(message.readBy || []), userId]);
@@ -572,7 +624,7 @@ export async function markConversationRead(conversationId, userId) {
     message.readAt = now();
     await persist("messages", message);
   }));
-  return true;
+  return { marked: true, shareReceipt: privacySettingsFor(userId).privacy?.readReceipts !== false };
 }
 
 export async function getStories(userId) {
@@ -580,7 +632,7 @@ export async function getStories(userId) {
   return stories
     .filter((story) => !story.expiresAt || new Date(story.expiresAt) > new Date())
     .filter((story) => !memoryIsBlockedBetween(userId, story.userId))
-    .map((story) => ({ ...clone(story), user: publicUser(users.find((user) => user.id === story.userId)) }))
+    .map((story) => ({ ...clone(story), user: presentUserForViewer(users.find((user) => user.id === story.userId), userId) }))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
@@ -599,7 +651,7 @@ export async function createStory(userId, input) {
   };
   stories.push(story);
   await persist("stories", story);
-  return { ...clone(story), user: publicUser(users.find((user) => user.id === String(userId))) };
+  return { ...clone(story), user: presentUserForViewer(users.find((user) => user.id === String(userId)), userId) };
 }
 
 export async function viewStory(id, userId, reaction) {
@@ -616,7 +668,7 @@ export async function getNotifications(userId) {
   if (databaseReady()) return mongoData.getNotifications(userId);
   return notifications
     .filter((item) => item.userId === String(userId))
-    .map((item) => ({ ...clone(item), actor: publicUser(users.find((user) => user.id === item.actorId)) }))
+    .map((item) => ({ ...clone(item), actor: presentUserForViewer(users.find((user) => user.id === item.actorId), userId) }))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
@@ -631,6 +683,7 @@ export async function markNotificationsRead(userId) {
 
 export async function createRealtimeNotification(userId, actorId, input = {}) {
   if (databaseReady()) return mongoData.createRealtimeNotification(userId, actorId, input);
+  if (!notificationEnabledFor(userId, input.type)) return null;
   const notification = {
     id: makeId("n"),
     userId: String(userId),
@@ -644,7 +697,7 @@ export async function createRealtimeNotification(userId, actorId, input = {}) {
   };
   notifications.push(notification);
   await persist("notifications", notification);
-  return { ...clone(notification), actor: publicUser(users.find((item) => item.id === notification.actorId)) };
+  return { ...clone(notification), actor: presentUserForViewer(users.find((item) => item.id === notification.actorId), userId) };
 }
 
 export async function getCalls(userId) {
@@ -652,7 +705,7 @@ export async function getCalls(userId) {
   return calls
     .filter((item) => item.userId === String(userId))
     .map((item) => {
-      const peer = publicUser(users.find((user) => user.id === item.peerId));
+      const peer = presentUserForViewer(users.find((user) => user.id === item.peerId), userId);
       const directConversation = !item.conversationId && peer && conversations.find(
         (conversation) => conversation.type === "direct" && canAccess(conversation, userId) && canAccess(conversation, peer.id),
       );
@@ -682,7 +735,7 @@ export async function createCall(userId, input) {
   };
   calls.push(call);
   await persist("calls", call);
-  return { ...clone(call), peer: publicUser(users.find((user) => user.id === peerId)) };
+  return { ...clone(call), peer: presentUserForViewer(users.find((user) => user.id === peerId), userId) };
 }
 
 export async function updateCall(id, updates = {}) {
@@ -694,14 +747,14 @@ export async function updateCall(id, updates = {}) {
   }
   if (updates.duration !== undefined) call.duration = Math.max(0, Number(updates.duration) || 0);
   await persist("calls", call);
-  return { ...clone(call), peer: publicUser(users.find((user) => user.id === call.peerId)) };
+  return { ...clone(call), peer: presentUserForViewer(users.find((user) => user.id === call.peerId), call.userId) };
 }
 
 export async function listFriends(userId) {
   if (databaseReady()) return mongoData.listFriends(userId);
   return users
     .filter((user) => user.id !== String(userId) && relationshipFor(userId, user.id) === "friends")
-    .map((user) => ({ ...publicUser(user), relationship: "friends" }));
+    .map((user) => ({ ...presentUserForViewer(user, userId), relationship: "friends" }));
 }
 
 export async function listFriendRequests(userId, direction) {
@@ -714,7 +767,7 @@ export async function listFriendRequests(userId, direction) {
     const otherUserId = direction === "sent" ? record.recipientId : record.requesterId;
     return {
       ...clone(record),
-      user: { ...publicUser(users.find((user) => user.id === otherUserId)), relationship: relationshipFor(userId, otherUserId) },
+      user: { ...presentUserForViewer(users.find((user) => user.id === otherUserId), userId), relationship: relationshipFor(userId, otherUserId) },
     };
   });
 }
@@ -819,11 +872,13 @@ async function unblockUser(actorId, target) {
 }
 
 async function createRelationshipNotification(userId, actorId, kind) {
+  if (!notificationEnabledFor(userId, kind)) return null;
   const actor = users.find((user) => user.id === actorId);
   const notification = {
     id: makeId("n"),
     userId,
     actorId,
+    type: kind,
     title: kind === "friend-accepted" ? "Friend request accepted" : "New friend request",
     body: kind === "friend-accepted" ? `${actor?.username || "Someone"} accepted your friend request.` : `${actor?.username || "Someone"} sent you a friend request.`,
     read: false,
@@ -837,11 +892,19 @@ async function createRelationshipNotification(userId, actorId, kind) {
 function relationshipResult(action, actorId, target, friendship, notification = null) {
   return {
     action,
-    user: { ...publicUser(target), relationship: relationshipFor(actorId, target.id) },
+    user: { ...presentUserForViewer(target, actorId), relationship: relationshipFor(actorId, target.id) },
     friendship: friendship ? clone(friendship) : null,
     notification,
     affectedUserIds: unique([actorId, target.id]),
   };
+}
+
+function notificationEnabledFor(userId, type) {
+  const notifications = privacySettingsFor(userId).notifications || defaultSettings().notifications;
+  if (type === "message") return notifications.messages !== false;
+  if (type === "call") return notifications.calls !== false;
+  if (type === "friend-request" || type === "friend-accepted") return notifications.friendRequests !== false;
+  return true;
 }
 
 export async function searchEverything(userId, query) {
@@ -880,6 +943,101 @@ export async function updateSettings(userId, updates) {
   return clone(value);
 }
 
+const openReportStatuses = new Set(["open", "in_review"]);
+
+function reportTarget(targetType, targetId) {
+  if (targetType === "user") return users.find((user) => user.id === String(targetId)) || null;
+  if (targetType === "message") return messages.find((message) => message.id === String(targetId)) || null;
+  if (targetType === "story") return stories.find((story) => story.id === String(targetId)) || null;
+  return null;
+}
+
+function presentReport(report) {
+  const value = clone(report);
+  const reporter = users.find((user) => user.id === value.reporterId);
+  const target = reportTarget(value.targetType, value.targetId);
+  return {
+    ...value,
+    reporter: reporter ? publicUser(reporter) : null,
+    target: target ? (value.targetType === "user" ? publicUser(target) : { id: target.id, userId: target.userId || target.senderId, content: target.content || target.caption || "" }) : null,
+  };
+}
+
+export async function createReport(reporterId, input) {
+  if (databaseReady()) return mongoData.createReport(reporterId, input);
+  const reporter = users.find((user) => user.id === String(reporterId));
+  const target = reportTarget(input.targetType, input.targetId);
+  if (!reporter || !target) throw new AppError("The reported item was not found.", 404);
+  const targetOwnerId = input.targetType === "user" ? target.id : (target.userId || target.senderId);
+  if (String(targetOwnerId) === String(reporterId)) throw new AppError("You cannot report your own content.", 422);
+  if (reports.some((report) => report.reporterId === String(reporterId) && report.targetType === input.targetType && report.targetId === String(input.targetId) && openReportStatuses.has(report.status))) {
+    throw new AppError("You already have an open report for this item.", 409);
+  }
+  const report = {
+    id: makeId("r"),
+    reporterId: String(reporterId),
+    targetType: input.targetType,
+    targetId: String(input.targetId),
+    reason: String(input.reason).trim(),
+    details: String(input.details || "").trim(),
+    status: "open",
+    resolution: "",
+    resolvedBy: null,
+    resolvedAt: null,
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  reports.unshift(report);
+  await persist("reports", report);
+  return presentReport(report);
+}
+
+export async function listReports(status) {
+  if (databaseReady()) return mongoData.listReports(status);
+  return reports
+    .filter((report) => !status || report.status === status)
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))
+    .map(presentReport);
+}
+
+export async function updateReportStatus(id, adminId, input) {
+  if (databaseReady()) return mongoData.updateReportStatus(id, adminId, input);
+  const index = reports.findIndex((report) => report.id === String(id));
+  if (index < 0) return null;
+  const status = input.status;
+  const resolved = status === "resolved" || status === "dismissed";
+  reports[index] = {
+    ...reports[index],
+    status,
+    resolution: input.resolution !== undefined ? String(input.resolution || "").trim() : reports[index].resolution,
+    resolvedBy: resolved ? String(adminId) : null,
+    resolvedAt: resolved ? now() : null,
+    updatedAt: now(),
+  };
+  await persist("reports", reports[index]);
+  return presentReport(reports[index]);
+}
+
+export async function listAdminUsers() {
+  if (databaseReady()) return mongoData.listAdminUsers();
+  return users
+    .filter((user) => user.role !== "assistant")
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))
+    .map(publicUser);
+}
+
+export async function setUserDisabled(id, disabled, actorId) {
+  if (databaseReady()) return mongoData.setUserDisabled(id, disabled, actorId);
+  const index = users.findIndex((user) => user.id === String(id));
+  if (index < 0) return null;
+  const target = users[index];
+  if (target.id === String(actorId)) throw new AppError("You cannot change your own account status.", 403);
+  if (target.role === "admin" || target.role === "assistant") throw new AppError("Administrator accounts cannot be locked here.", 403);
+  users[index] = { ...target, disabled: Boolean(disabled), isOnline: disabled ? false : target.isOnline, updatedAt: now() };
+  await persist("users", users[index]);
+  return publicUser(users[index]);
+}
+
 export async function adminStats() {
   if (databaseReady()) return mongoData.adminStats();
   const formatter = new Intl.DateTimeFormat("en", { weekday: "short" });
@@ -904,7 +1062,7 @@ export async function adminStats() {
       online: users.filter((user) => user.isOnline).length,
       messages: messages.length,
       storageBytes,
-      reports: 0,
+      reports: reports.filter((report) => openReportStatuses.has(report.status)).length,
     },
     chart: days.map((day) => ({ label: day.label, messages: messageCounts.get(day.key) || 0 })),
     recentUsers: users.filter((user) => user.role !== "assistant").slice(-4).reverse().map(publicUser),

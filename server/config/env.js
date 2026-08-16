@@ -12,6 +12,7 @@ export const env = {
   port: Number(process.env.PORT || 5000),
   clientUrl: process.env.CLIENT_URL || "http://localhost:5173",
   mongoUri: process.env.MONGODB_URI || "",
+  mongoDnsServers: String(process.env.MONGODB_DNS_SERVERS || "").split(",").map((server) => server.trim()).filter(Boolean),
   accessSecret: process.env.JWT_ACCESS_SECRET || "lumina-local-access-secret",
   refreshSecret: process.env.JWT_REFRESH_SECRET || "lumina-local-refresh-secret",
   accessTtl: process.env.ACCESS_TOKEN_TTL || "15m",

@@ -87,6 +87,31 @@ describe("Lumina API", () => {
     expect(timeline.body.data.messages.at(-1).id).toBe(created.body.data.id);
   });
 
+  it("rejects empty or unsupported messages and conversations with unknown participants", async () => {
+    const authorization = await login("alex@lumina.chat");
+
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", authorization)
+      .send({ type: "direct", participants: ["missing-user"] })
+      .expect(422);
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", authorization)
+      .send({ type: "group", participants: ["u-maya", "missing-user"] })
+      .expect(422);
+    await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", authorization)
+      .send({})
+      .expect(422);
+    await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", authorization)
+      .send({ type: "unsupported", content: "Invalid type" })
+      .expect(422);
+  });
+
   it("removes a direct conversation from only the current user's inbox", async () => {
     const alexAuthorization = await login("alex@lumina.chat");
     const mayaAuthorization = await login("maya@lumina.chat");
@@ -185,6 +210,88 @@ describe("Lumina API", () => {
     await request(app).get("/api/admin/dashboard").set("Authorization", mayaAuthorization).expect(403);
   });
 
+  it("creates reports for users, messages, and stories and restricts their moderation workflow to admins", async () => {
+    const alexAuthorization = await login("alex@lumina.chat");
+    const mayaAuthorization = await login("maya@lumina.chat");
+    const userReport = await request(app)
+      .post("/api/reports")
+      .set("Authorization", mayaAuthorization)
+      .send({ targetType: "user", targetId: "u-jordan", reason: "Harassment", details: "Repeated unwanted messages." })
+      .expect(201);
+    await request(app)
+      .post("/api/reports")
+      .set("Authorization", mayaAuthorization)
+      .send({ targetType: "message", targetId: "m-2", reason: "Abusive message" })
+      .expect(201);
+    await request(app)
+      .post("/api/reports")
+      .set("Authorization", mayaAuthorization)
+      .send({ targetType: "story", targetId: "s-sofia", reason: "Inappropriate content" })
+      .expect(201);
+
+    expect(userReport.body.data).toMatchObject({ targetType: "user", targetId: "u-jordan", status: "open", reporter: { id: "u-maya" } });
+    await request(app).get("/api/admin/reports").set("Authorization", mayaAuthorization).expect(403);
+    await request(app).patch(`/api/admin/reports/${userReport.body.data.id}`).set("Authorization", mayaAuthorization).send({ status: "in_review" }).expect(403);
+
+    const reports = await request(app).get("/api/admin/reports").set("Authorization", alexAuthorization).expect(200);
+    expect(reports.body.data).toHaveLength(3);
+    const reviewing = await request(app)
+      .patch(`/api/admin/reports/${userReport.body.data.id}`)
+      .set("Authorization", alexAuthorization)
+      .send({ status: "in_review" })
+      .expect(200);
+    expect(reviewing.body.data).toMatchObject({ status: "in_review", resolvedAt: null });
+
+    const resolved = await request(app)
+      .post(`/api/admin/reports/${userReport.body.data.id}/resolve`)
+      .set("Authorization", alexAuthorization)
+      .send({ resolution: "Reviewed and actioned." })
+      .expect(200);
+    expect(resolved.body.data).toMatchObject({ status: "resolved", resolution: "Reviewed and actioned.", resolvedBy: "u-alex" });
+    expect(resolved.body.data.resolvedAt).toBeTruthy();
+
+    const dashboard = await request(app).get("/api/admin/dashboard").set("Authorization", alexAuthorization).expect(200);
+    expect(dashboard.body.data.totals.reports).toBe(2);
+  });
+
+  it("allows an admin to lock a user, revoke their sessions, and disconnect their sockets", async () => {
+    const maya = request.agent(app);
+    const mayaLogin = await loginSession(maya, "maya@lumina.chat", "Password123!", "moderation-target-device");
+    const mayaAuthorization = `Bearer ${mayaLogin.body.data.accessToken}`;
+    const alexAuthorization = await login("alex@lumina.chat");
+    const disconnected = [];
+    const originalIo = app.get("io");
+    app.set("io", {
+      to: () => ({ emit: () => undefined }),
+      in: (room) => ({ disconnectSockets: (force) => disconnected.push({ room, force }) }),
+    });
+
+    try {
+      await request(app).get("/api/admin/users").set("Authorization", mayaAuthorization).expect(403);
+      const locked = await request(app)
+        .patch("/api/admin/users/u-maya/disabled")
+        .set("Authorization", alexAuthorization)
+        .send({ disabled: true })
+        .expect(200);
+      expect(locked.body.data).toMatchObject({ user: { id: "u-maya", disabled: true } });
+      expect(locked.body.data.revokedSessions).toBeGreaterThanOrEqual(1);
+      expect(disconnected).toEqual([{ room: "u-maya", force: true }]);
+
+      await maya.post("/api/auth/refresh").send({}).expect(401);
+      await request(app).post("/api/auth/login").send({ email: "maya@lumina.chat", password: "Password123!" }).expect(403);
+      await request(app).get("/api/conversations").set("Authorization", mayaAuthorization).expect(403);
+
+      await request(app)
+        .patch("/api/admin/users/u-maya/disabled")
+        .set("Authorization", alexAuthorization)
+        .send({ disabled: false })
+        .expect(200);
+      await request(app).post("/api/auth/login").send({ email: "maya@lumina.chat", password: "Password123!" }).expect(200);
+    } finally {
+      app.set("io", originalIo);
+    }
+  });
+
   it("registers an account and creates an authenticated device session", async () => {
     const agent = request.agent(app);
     const response = await agent
@@ -199,6 +306,73 @@ describe("Lumina API", () => {
       .set("Authorization", `Bearer ${response.body.data.accessToken}`)
       .expect(200);
     expect(sessions.body.data).toMatchObject([{ name: "Registration browser", isCurrent: true }]);
+  });
+
+  it("sends, verifies, and enforces email verification for a newly registered account", async () => {
+    const email = "verify.member@lumina.chat";
+    const registered = await request(app)
+      .post("/api/auth/register")
+      .send({ username: "Verify Member", email, password: "NewPassword123!", device: { id: "verify-device", name: "Verification browser", platform: "test" } })
+      .expect(201);
+
+    expect(registered.body.data.user).toMatchObject({ email, verified: false });
+    expect(registered.body.data.verification.debugOtp).toMatch(/^\d{6}$/);
+    const unverifiedAuthorization = `Bearer ${registered.body.data.accessToken}`;
+
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", unverifiedAuthorization)
+      .send({ type: "direct", participants: ["u-maya"] })
+      .expect(403);
+
+    const unknown = await request(app)
+      .post("/api/auth/send-verification")
+      .send({ email: "not-an-account@lumina.chat" })
+      .expect(200);
+    const resent = await request(app)
+      .post("/api/auth/send-verification")
+      .send({ email })
+      .expect(200);
+
+    expect(unknown.body.message).toBe("If that account needs verification, an OTP has been sent.");
+    expect(resent.body.message).toBe(unknown.body.message);
+    expect(unknown.body.data).toEqual({});
+    expect(resent.body.data.debugOtp).toMatch(/^\d{6}$/);
+    expect(resent.headers.ratelimit).toBeTruthy();
+
+    const verified = await request(app)
+      .post("/api/auth/verify-otp")
+      .send({ email, otp: resent.body.data.debugOtp, purpose: "verify" })
+      .expect(200);
+    expect(verified.body.data).toMatchObject({ verified: true, user: { email, verified: true } });
+
+    const loginResponse = await request(app)
+      .post("/api/auth/login")
+      .send({ email, password: "NewPassword123!" })
+      .expect(200);
+    expect(loginResponse.body.data.user.verified).toBe(true);
+
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", `Bearer ${loginResponse.body.data.accessToken}`)
+      .send({ type: "direct", participants: ["u-maya"] })
+      .expect(201);
+  });
+
+  it("validates and persists supported profile fields", async () => {
+    const authorization = await login("alex@lumina.chat");
+    const updated = await request(app)
+      .patch("/api/users/me")
+      .set("Authorization", authorization)
+      .send({ username: "Alex Updated", gender: "nonbinary", phone: "0900000000", birthday: "2000-01-01" })
+      .expect(200);
+    expect(updated.body.data).toMatchObject({ username: "Alex Updated", gender: "nonbinary", phone: "0900000000" });
+
+    await request(app)
+      .patch("/api/users/me")
+      .set("Authorization", authorization)
+      .send({ birthday: "not-a-date" })
+      .expect(422);
   });
 
   it("rotates refresh sessions and rejects an already-rotated refresh token", async () => {
@@ -366,6 +540,29 @@ describe("Lumina API", () => {
     expect(afterLeave.body.data.admins).toEqual(["u-maya"]);
   });
 
+  it("removes a group cleanly when its final member leaves", async () => {
+    const authorization = await login("alex@lumina.chat");
+    const created = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", authorization)
+      .send({ type: "group", name: "Temporary group", participants: ["u-maya"] })
+      .expect(201);
+    const conversationId = created.body.data.id;
+
+    await request(app)
+      .patch(`/api/conversations/${conversationId}`)
+      .set("Authorization", authorization)
+      .send({ participants: ["u-alex"], admins: ["u-alex"] })
+      .expect(200);
+    const left = await request(app)
+      .post(`/api/conversations/${conversationId}/leave`)
+      .set("Authorization", authorization)
+      .expect(200);
+    expect(left.body.data).toMatchObject({ id: conversationId, left: true, deleted: true, admins: [] });
+    await request(app).get(`/api/conversations/${conversationId}`).set("Authorization", authorization).expect(404);
+    await request(app).get(`/api/messages/${conversationId}`).set("Authorization", authorization).expect(404);
+  });
+
   it("handles friend requests, notifications, blocking, and unblocking without restoring friendships", async () => {
     const alexAuthorization = await login("alex@lumina.chat");
     const mayaAuthorization = await login("maya@lumina.chat");
@@ -475,5 +672,102 @@ describe("Lumina API", () => {
       .send({ action: "cancel" })
       .expect(200);
     expect(cancelled.body.data.friendship.status).toBe("cancelled");
+  });
+
+  it("applies privacy settings to profiles, conversations, and read receipts", async () => {
+    const alexAuthorization = await login("alex@lumina.chat");
+    const mayaAuthorization = await login("maya@lumina.chat");
+
+    await request(app)
+      .patch("/api/settings")
+      .set("Authorization", mayaAuthorization)
+      .send({ language: "vi", privacy: { lastSeen: "nobody", profilePhoto: "nobody", readReceipts: false } })
+      .expect(200);
+
+    const [privateAvatar] = (await request(app)
+      .post("/api/uploads?purpose=avatar")
+      .set("Authorization", mayaAuthorization)
+      .attach("files", validPng, { filename: "private-avatar.png", contentType: "image/png" })
+      .expect(201)).body.data;
+    uploadedTestFiles.add(privateAvatar.url.split("/").at(-1));
+    await request(app).patch("/api/users/me").set("Authorization", mayaAuthorization).send({ avatar: privateAvatar.url }).expect(200);
+
+    const savedSettings = await request(app).get("/api/settings").set("Authorization", mayaAuthorization).expect(200);
+    expect(savedSettings.body.data.language).toBe("vi");
+
+    const profile = await request(app).get("/api/users/u-maya").set("Authorization", alexAuthorization).expect(200);
+    expect(profile.body.data).toMatchObject({ id: "u-maya", avatar: "", coverPhoto: "", lastSeen: null });
+    await request(app).get(privateAvatar.url).set("Authorization", alexAuthorization).expect(403);
+    await request(app).get(privateAvatar.url).set("Authorization", mayaAuthorization).expect(200);
+
+    const ownProfile = await request(app).get("/api/users/u-maya").set("Authorization", mayaAuthorization).expect(200);
+    expect(ownProfile.body.data.avatar).toBeTruthy();
+
+    const conversation = await request(app).get("/api/conversations/c-maya").set("Authorization", alexAuthorization).expect(200);
+    const maya = conversation.body.data.participantUsers.find((user) => user.id === "u-maya");
+    expect(maya).toMatchObject({ avatar: "", coverPhoto: "", lastSeen: null });
+    expect(conversation.body.data.avatar).toBe("");
+
+    const created = await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", alexAuthorization)
+      .send({ type: "text", content: "Private receipt" })
+      .expect(201);
+    const read = await request(app).post("/api/messages/c-maya/read").set("Authorization", mayaAuthorization).expect(200);
+    expect(read.body.data.shared).toBe(false);
+
+    const messages = await request(app).get("/api/messages/c-maya").set("Authorization", alexAuthorization).expect(200);
+    const message = messages.body.data.messages.find((item) => item.id === created.body.data.id);
+    expect(message).toMatchObject({ status: "delivered" });
+    expect(message.readBy).not.toContain("u-maya");
+  });
+
+  it("shows friends-only profile details only after friendship is accepted", async () => {
+    const alexAuthorization = await login("alex@lumina.chat");
+    const mayaAuthorization = await login("maya@lumina.chat");
+
+    await request(app)
+      .patch("/api/settings")
+      .set("Authorization", mayaAuthorization)
+      .send({ privacy: { lastSeen: "friends", profilePhoto: "friends" } })
+      .expect(200);
+
+    const before = await request(app).get("/api/users/u-maya").set("Authorization", alexAuthorization).expect(200);
+    expect(before.body.data).toMatchObject({ avatar: "", lastSeen: null });
+
+    await request(app).post("/api/friends/u-maya").set("Authorization", alexAuthorization).send({ action: "request" }).expect(200);
+    await request(app).post("/api/friends/u-alex").set("Authorization", mayaAuthorization).send({ action: "accept" }).expect(200);
+
+    const after = await request(app).get("/api/users/u-maya").set("Authorization", alexAuthorization).expect(200);
+    expect(after.body.data.avatar).toBeTruthy();
+    expect(after.body.data.lastSeen).toBeTruthy();
+  });
+
+  it("does not create disabled message or friend notifications and allows unfriend", async () => {
+    const alexAuthorization = await login("alex@lumina.chat");
+    const mayaAuthorization = await login("maya@lumina.chat");
+
+    await request(app)
+      .patch("/api/settings")
+      .set("Authorization", mayaAuthorization)
+      .send({ notifications: { messages: false, friendRequests: false } })
+      .expect(200);
+
+    const sent = await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", alexAuthorization)
+      .send({ type: "text", content: "No notification please" })
+      .expect(201);
+    const afterMessage = await request(app).get("/api/notifications").set("Authorization", mayaAuthorization).expect(200);
+    expect(afterMessage.body.data.some((item) => item.type === "message" && item.data?.messageId === sent.body.data.id)).toBe(false);
+
+    await request(app).post("/api/friends/u-maya").set("Authorization", alexAuthorization).send({ action: "request" }).expect(200);
+    const afterRequest = await request(app).get("/api/notifications").set("Authorization", mayaAuthorization).expect(200);
+    expect(afterRequest.body.data.some((item) => item.type === "friend-request" && item.actorId === "u-alex")).toBe(false);
+
+    await request(app).post("/api/friends/u-alex").set("Authorization", mayaAuthorization).send({ action: "accept" }).expect(200);
+    await request(app).post("/api/friends/u-maya").set("Authorization", alexAuthorization).send({ action: "remove" }).expect(200);
+    const friends = await request(app).get("/api/friends").set("Authorization", alexAuthorization).expect(200);
+    expect(friends.body.data.map((friend) => friend.id)).not.toContain("u-maya");
   });
 });

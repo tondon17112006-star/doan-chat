@@ -35,3 +35,4 @@ function limitsFor(prefix, emailLimit, ipLimit) {
 
 export const loginRateLimits = limitsFor("login", 10, 40);
 export const forgotPasswordRateLimits = limitsFor("forgot-password", 5, 20);
+export const verificationRateLimits = limitsFor("send-verification", 3, 10);

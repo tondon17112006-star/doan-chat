@@ -1,10 +1,10 @@
 // File: server/controllers/userController.js
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { assertOwnedUploadPurpose, compareUserPassword, findUserByEmail, findUserById, listUsers, updatePassword, updateUser } from "../services/dataService.js";
+import { assertOwnedUploadPurpose, compareUserPassword, findUserByEmail, findUserById, getUserProfile, listUsers, updatePassword, updateUser } from "../services/dataService.js";
 import { AppError } from "../utils/AppError.js";
-import { cleanText, publicUser } from "../utils/helpers.js";
+import { cleanText } from "../utils/helpers.js";
 import { audit } from "../services/auditService.js";
-import { revokeOtherSessionsAfterPasswordChange } from "../services/authService.js";
+import { revokeOtherSessionsAfterPasswordChange, sendVerificationOtp } from "../services/authService.js";
 
 export const me = asyncHandler(async (request, response) => {
   response.json({ success: true, data: request.user });
@@ -15,20 +15,22 @@ export const list = asyncHandler(async (request, response) => {
 });
 
 export const profile = asyncHandler(async (request, response) => {
-  const user = await findUserById(request.params.id);
+  const user = await getUserProfile(request.params.id, request.user.id);
   if (!user) throw new AppError("User not found.", 404);
-  response.json({ success: true, data: publicUser(user) });
+  response.json({ success: true, data: user });
 });
 
 export const updateProfile = asyncHandler(async (request, response) => {
   const allowed = ["username", "bio", "birthday", "gender", "phone", "status", "location", "avatar", "coverPhoto"];
+  const textLimits = { username: 80, bio: 500, gender: 40, phone: 40, status: 160, location: 120 };
   const updates = {};
   for (const key of allowed) {
     if (request.body[key] !== undefined) {
-      updates[key] = ["username", "bio", "status", "location"].includes(key) ? cleanText(request.body[key], 280) : request.body[key];
+      updates[key] = textLimits[key] ? cleanText(request.body[key], textLimits[key]) : request.body[key];
     }
   }
   if (updates.avatar) await assertOwnedUploadPurpose(request.user.id, updates.avatar, "avatar");
+  if (updates.coverPhoto) await assertOwnedUploadPurpose(request.user.id, updates.coverPhoto, "avatar");
   const user = await updateUser(request.user.id, updates);
   await audit(request, "edit", "user", request.user.id, { fields: Object.keys(updates) });
   response.json({ success: true, data: user });
@@ -54,5 +56,6 @@ export const changeEmail = asyncHandler(async (request, response) => {
   const selectedUser = await findUserByEmail(user.email, true);
   if (!(await compareUserPassword(selectedUser, request.body.password))) throw new AppError("Password is incorrect.", 400);
   const updated = await updateUser(request.user.id, { email: request.body.email.toLowerCase(), verified: false });
-  response.json({ success: true, data: updated });
+  const verification = await sendVerificationOtp(updated.email);
+  response.json({ success: true, data: { user: updated, verification } });
 });

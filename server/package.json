@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:mongo": "vitest run tests/mongo.integration.test.js",
     "seed:mongo": "node scripts/seedMongo.js",
-    "migrate:mongo": "node scripts/migrateMongo.js"
+    "migrate:mongo": "node scripts/migrateMongo.js",
+    "migrate:legacy-mongo": "node scripts/migrateLegacyMongo.js"
   },
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",

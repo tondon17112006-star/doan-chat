@@ -24,8 +24,14 @@ export const getOne = asyncHandler(async (request, response) => {
 });
 
 export const create = asyncHandler(async (request, response) => {
+  const suppliedParticipants = [...new Set((request.body.participants || []).map((id) => String(id).trim()).filter(Boolean))];
+  const knownParticipants = await Promise.all([...new Set([String(request.user.id), ...suppliedParticipants])].map((id) => findUserById(id)));
+  if (knownParticipants.some((user) => !user)) {
+    throw new AppError("One or more conversation participants do not exist.", 422);
+  }
+
   if (request.body.type === "direct") {
-    const targets = [...new Set((request.body.participants || []).map(String).filter((id) => id !== String(request.user.id)))];
+    const targets = suppliedParticipants.filter((id) => id !== String(request.user.id));
     if (targets.length !== 1) throw new AppError("A direct conversation must contain exactly one other user.", 422);
     if (await isBlockedBetween(request.user.id, targets[0])) {
       throw new AppError("You cannot start a conversation with a user who has blocked you or whom you have blocked.", 403);
@@ -36,7 +42,7 @@ export const create = asyncHandler(async (request, response) => {
     name: cleanText(request.body.name, 100),
   });
   if (!conversation) throw new AppError("Conversation could not be created.", 403);
-  request.app.get("io")?.to(conversation.participants).emit("group:update", conversation);
+  request.app.get("io")?.to(conversation.participants).emit("group:update", { id: conversation.id });
   response.status(201).json({ success: true, data: conversation });
 });
 
@@ -65,7 +71,7 @@ export const update = asyncHandler(async (request, response) => {
   const removedParticipants = current.participants.filter((id) => !conversation.participants.map(String).includes(String(id)));
   removeSocketsFromConversation(request.app.get("io"), removedParticipants, conversation.id);
   if (requestedGroupFields.length) {
-    request.app.get("io")?.to([...new Set([...current.participants, ...conversation.participants])]).emit("group:update", conversation);
+    request.app.get("io")?.to([...new Set([...current.participants, ...conversation.participants])]).emit("group:update", { id: conversation.id });
   } else {
     request.app.get("io")?.to(String(request.user.id)).emit("group:update", conversation);
   }
@@ -79,8 +85,10 @@ export const leave = asyncHandler(async (request, response) => {
   const result = await leaveConversation(request.params.id, request.user.id);
   if (!result) throw new AppError("Conversation not found.", 404);
   removeSocketsFromConversation(request.app.get("io"), [request.user.id], result.id);
-  request.app.get("io")?.to([...new Set([...conversation.participants, ...result.participants])]).emit("group:update", result);
-  response.json({ success: true, data: { id: conversation.id, left: true, admins: result.admins } });
+  if (!result.deleted) {
+    request.app.get("io")?.to([...new Set([...conversation.participants, ...result.participants])]).emit("group:update", { id: result.id });
+  }
+  response.json({ success: true, data: { id: conversation.id, left: true, deleted: Boolean(result.deleted), admins: result.admins } });
 });
 
 export const remove = asyncHandler(async (request, response) => {
