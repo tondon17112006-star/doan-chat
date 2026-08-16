@@ -425,6 +425,15 @@ export async function leaveConversation(id, userId) {
     const successor = participants.includes(String(conversation.createdBy)) ? String(conversation.createdBy) : participants[0];
     admins = [successor];
   }
+  if (!participants.length) {
+    conversations.splice(index, 1);
+    messages = messages.filter((message) => message.conversationId !== String(id));
+    uploads = uploads.map((upload) => ({
+      ...upload,
+      conversationIds: (upload.conversationIds || []).filter((conversationId) => String(conversationId) !== String(id)),
+    }));
+    return { id: String(id), participants: [], admins: [], deleted: true };
+  }
   conversations[index] = { ...conversation, participants, admins, updatedAt: now() };
   await persist("conversations", conversations[index]);
   return clone(conversations[index]);

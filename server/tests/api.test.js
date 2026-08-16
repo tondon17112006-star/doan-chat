@@ -87,6 +87,31 @@ describe("Lumina API", () => {
     expect(timeline.body.data.messages.at(-1).id).toBe(created.body.data.id);
   });
 
+  it("rejects empty or unsupported messages and conversations with unknown participants", async () => {
+    const authorization = await login("alex@lumina.chat");
+
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", authorization)
+      .send({ type: "direct", participants: ["missing-user"] })
+      .expect(422);
+    await request(app)
+      .post("/api/conversations")
+      .set("Authorization", authorization)
+      .send({ type: "group", participants: ["u-maya", "missing-user"] })
+      .expect(422);
+    await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", authorization)
+      .send({})
+      .expect(422);
+    await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", authorization)
+      .send({ type: "unsupported", content: "Invalid type" })
+      .expect(422);
+  });
+
   it("removes a direct conversation from only the current user's inbox", async () => {
     const alexAuthorization = await login("alex@lumina.chat");
     const mayaAuthorization = await login("maya@lumina.chat");
@@ -199,6 +224,22 @@ describe("Lumina API", () => {
       .set("Authorization", `Bearer ${response.body.data.accessToken}`)
       .expect(200);
     expect(sessions.body.data).toMatchObject([{ name: "Registration browser", isCurrent: true }]);
+  });
+
+  it("validates and persists supported profile fields", async () => {
+    const authorization = await login("alex@lumina.chat");
+    const updated = await request(app)
+      .patch("/api/users/me")
+      .set("Authorization", authorization)
+      .send({ username: "Alex Updated", gender: "nonbinary", phone: "0900000000", birthday: "2000-01-01" })
+      .expect(200);
+    expect(updated.body.data).toMatchObject({ username: "Alex Updated", gender: "nonbinary", phone: "0900000000" });
+
+    await request(app)
+      .patch("/api/users/me")
+      .set("Authorization", authorization)
+      .send({ birthday: "not-a-date" })
+      .expect(422);
   });
 
   it("rotates refresh sessions and rejects an already-rotated refresh token", async () => {
@@ -364,6 +405,29 @@ describe("Lumina API", () => {
       .expect(200);
     expect(afterLeave.body.data.participants).toEqual(["u-maya"]);
     expect(afterLeave.body.data.admins).toEqual(["u-maya"]);
+  });
+
+  it("removes a group cleanly when its final member leaves", async () => {
+    const authorization = await login("alex@lumina.chat");
+    const created = await request(app)
+      .post("/api/conversations")
+      .set("Authorization", authorization)
+      .send({ type: "group", name: "Temporary group", participants: ["u-maya"] })
+      .expect(201);
+    const conversationId = created.body.data.id;
+
+    await request(app)
+      .patch(`/api/conversations/${conversationId}`)
+      .set("Authorization", authorization)
+      .send({ participants: ["u-alex"], admins: ["u-alex"] })
+      .expect(200);
+    const left = await request(app)
+      .post(`/api/conversations/${conversationId}/leave`)
+      .set("Authorization", authorization)
+      .expect(200);
+    expect(left.body.data).toMatchObject({ id: conversationId, left: true, deleted: true, admins: [] });
+    await request(app).get(`/api/conversations/${conversationId}`).set("Authorization", authorization).expect(404);
+    await request(app).get(`/api/messages/${conversationId}`).set("Authorization", authorization).expect(404);
   });
 
   it("handles friend requests, notifications, blocking, and unblocking without restoring friendships", async () => {

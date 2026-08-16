@@ -236,7 +236,7 @@ export async function listUsers(query = "", currentUserId) {
 }
 
 export async function updateUser(id, updates) {
-  const allowed = ["email", "username", "avatar", "bio", "status", "location", "role", "verified", "disabled", "isOnline", "lastSeen", "passwordHash", "passwordChangedAt"];
+  const allowed = ["email", "username", "avatar", "coverPhoto", "bio", "birthday", "gender", "phone", "status", "location", "role", "verified", "disabled", "isOnline", "lastSeen", "passwordHash", "passwordChangedAt"];
   const payload = Object.fromEntries(Object.entries(updates).filter(([key]) => allowed.includes(key)));
   if (payload.email) payload.email = String(payload.email).trim().toLowerCase();
   const user = await User.findByIdAndUpdate(String(id), { $set: payload }, { new: true, runValidators: true }).select("+email").lean();
@@ -353,6 +353,17 @@ export async function leaveConversation(id, userId) {
   const participants = conversation.participants.map(String).filter((participantId) => participantId !== String(userId));
   let admins = conversation.admins.map(String).filter((adminId) => adminId !== String(userId) && participants.includes(adminId));
   if (!admins.length && participants.length) admins = [participants.includes(String(conversation.createdBy)) ? String(conversation.createdBy) : participants[0]];
+  if (!participants.length) {
+    return withMongoTransaction(async (session) => {
+      const removed = await Conversation.findOneAndDelete({ _id: String(id), participants: String(userId) }).session(session || null).lean();
+      if (!removed) return null;
+      await Promise.all([
+        Message.deleteMany({ conversationId: String(id) }, sessionOptions(session)),
+        Upload.updateMany({ conversationIds: String(id) }, { $pull: { conversationIds: String(id) } }, sessionOptions(session)),
+      ]);
+      return { id: String(id), participants: [], admins: [], deleted: true };
+    });
+  }
   const updated = await Conversation.findByIdAndUpdate(String(id), { $set: { participants, admins } }, { new: true, runValidators: true }).lean();
   return record(updated);
 }

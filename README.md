@@ -27,6 +27,21 @@ Socket.IO API start together. MongoDB and Redis are optional for local demo mode
 Never commit `.env`; if it has previously been pushed, remove it from Git history
 and rotate every secret it contained.
 
+If another local project already uses ports `5000` or `5173`, keep it untouched
+and run Lumina on isolated ports in PowerShell instead:
+
+```powershell
+$env:PORT="5001"
+$env:CLIENT_URL="http://localhost:5174"
+$env:VITE_PORT="5174"
+$env:VITE_API_URL="http://localhost:5001/api"
+$env:VITE_SOCKET_URL="http://localhost:5001"
+npm run dev
+```
+
+Open `http://localhost:5174`. Close that terminal when finished; those temporary
+environment values apply only to that terminal session.
+
 ## MongoDB data layer
 
 MongoDB uses typed Mongoose models and is never seeded when the API starts. On a
@@ -40,6 +55,27 @@ npm run seed:mongo -w server
 `seed:mongo` refuses a non-empty database unless `--replace` is passed, and it
 refuses production by default. The API keeps the in-memory seed only when MongoDB
 is not configured, so `npm test` does not require a database.
+
+### Migrating the previous ObjectId schema
+
+If an earlier version of the project used collections such as `users`,
+`conversations` and `messages`, first run a non-mutating report:
+
+```bash
+npm run migrate:legacy-mongo -w server
+```
+
+Review the source/target counts and warnings, make a MongoDB backup, then apply
+only to the reported database name:
+
+```bash
+npm run migrate:legacy-mongo -w server -- --apply --confirm=chat_app
+```
+
+The migration creates `lumina_*` documents with the original IDs and never
+deletes or overwrites legacy collections. Legacy refresh tokens and devices are
+not migrated, so every user must sign in again and receives a revocable session
+from the current authentication system.
 
 Mongo integration tests are opt-in to prevent accidental data deletion. CI should
 provide an isolated MongoDB service/database whose name contains `test` or `ci`:
@@ -119,7 +155,8 @@ host for a resilient deployment.
 Server variables:
 
 - `NODE_ENV`, `PORT`, `CLIENT_URL`
-- `MONGODB_URI` (required in production), `REDIS_URL` (required for multi-instance
+- `MONGODB_URI` (required in production), `MONGODB_DNS_SERVERS` (optional
+  comma-separated Atlas SRV DNS fallback), `REDIS_URL` (required for multi-instance
   Socket.IO and recommended for production session/realtime coordination)
 - `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `ACCESS_TOKEN_TTL`,
   `REFRESH_TOKEN_TTL`

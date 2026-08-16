@@ -53,7 +53,20 @@ apiRouter.use(authenticate);
 
 apiRouter.get("/users", userController.list);
 apiRouter.get("/users/me", userController.me);
-apiRouter.patch("/users/me", userController.updateProfile);
+apiRouter.patch(
+  "/users/me",
+  body("username").optional().isString().trim().isLength({ min: 1, max: 80 }),
+  body("bio").optional().isString().isLength({ max: 500 }),
+  body("birthday").optional({ nullable: true }).isISO8601(),
+  body("gender").optional().isString().isLength({ max: 40 }),
+  body("phone").optional().isString().isLength({ max: 40 }),
+  body("status").optional().isString().isLength({ max: 160 }),
+  body("location").optional().isString().isLength({ max: 120 }),
+  body("avatar").optional().isString().isLength({ max: 2_048 }),
+  body("coverPhoto").optional().isString().isLength({ max: 2_048 }),
+  validate,
+  userController.updateProfile,
+);
 apiRouter.patch(
   "/users/me/password",
   body("currentPassword").isString().notEmpty().isLength({ max: 128 }),
@@ -79,6 +92,7 @@ apiRouter.post(
   "/conversations",
   body("type").isIn(["direct", "group"]),
   body("participants").isArray({ min: 1, max: 100 }),
+  body("participants.*").isString().trim().isLength({ min: 1, max: 200 }),
   validate,
   conversationController.create,
 );
@@ -100,6 +114,7 @@ apiRouter.delete("/conversations/:id", conversationController.remove);
 apiRouter.get("/messages/:conversationId", query("limit").optional().isInt({ min: 1, max: 100 }), validate, messageController.list);
 apiRouter.post(
   "/messages/:conversationId",
+  body("type").optional().isIn(["text", "image", "video", "audio", "file", "system"]),
   body("content").optional({ nullable: true }).isString().isLength({ max: 4_000 }),
   body("attachments").optional().isArray({ max: 10 }),
   validate,

@@ -2531,7 +2531,7 @@ kbd {
 
 /* Profile */
 .profile-modal-card { overflow:hidden; }
-.profile-cover { position:relative;height:130px;background:linear-gradient(135deg,#7578e8,#7399db 55%,#63bbb4); }
+.profile-cover { position:relative;height:130px;background:linear-gradient(135deg,#7578e8,#7399db 55%,#63bbb4);background-position:center;background-size:cover; }
 .cover-glow { position:absolute;inset:0;background:radial-gradient(circle at 70% 10%,rgba(255,255,255,.35),transparent 30%),radial-gradient(circle at 10% 90%,rgba(129,255,218,.25),transparent 30%); }
 .profile-cover > button { position:absolute;right:12px;bottom:12px;width:31px;height:31px;display:grid;place-items:center;border:0;border-radius:10px;color:white;background:rgba(0,0,0,.2);backdrop-filter:blur(8px); }
 .profile-modal-body { position:relative;padding:53px 23px 24px;text-align:center; }

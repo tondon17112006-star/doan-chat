@@ -35,6 +35,9 @@ export const create = asyncHandler(async (request, response) => {
       ? request.body.attachments.slice(0, 10).map(normalizeAttachment).filter(Boolean)
       : [],
   };
+  if (!input.content && !input.attachments.length) {
+    throw new AppError("A message must include text or at least one valid attachment.", 422);
+  }
   const message = await createMessage(request.user.id, request.params.conversationId, input);
   if (!message) throw new AppError("Conversation not found.", 404);
   const io = request.app.get("io");

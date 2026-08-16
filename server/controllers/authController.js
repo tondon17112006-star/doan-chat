@@ -3,6 +3,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import * as authService from "../services/authService.js";
 import { audit } from "../services/auditService.js";
 import { env } from "../config/env.js";
+import { AppError } from "../utils/AppError.js";
 
 const cookieOptions = (remember = true) => ({
   httpOnly: true,
@@ -27,6 +28,7 @@ export const login = asyncHandler(async (request, response) => {
 });
 
 export const demo = asyncHandler(async (request, response) => {
+  if (env.isProduction) throw new AppError("Route not found.", 404);
   request.body = { email: "alex@lumina.chat", password: "Password123!", remember: true, ...request.body };
   const result = await authService.login(request.body, request);
   response.cookie("lumina_refresh", result.refreshToken, cookieOptions(true));

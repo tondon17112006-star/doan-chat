@@ -22,13 +22,15 @@ export const profile = asyncHandler(async (request, response) => {
 
 export const updateProfile = asyncHandler(async (request, response) => {
   const allowed = ["username", "bio", "birthday", "gender", "phone", "status", "location", "avatar", "coverPhoto"];
+  const textLimits = { username: 80, bio: 500, gender: 40, phone: 40, status: 160, location: 120 };
   const updates = {};
   for (const key of allowed) {
     if (request.body[key] !== undefined) {
-      updates[key] = ["username", "bio", "status", "location"].includes(key) ? cleanText(request.body[key], 280) : request.body[key];
+      updates[key] = textLimits[key] ? cleanText(request.body[key], textLimits[key]) : request.body[key];
     }
   }
   if (updates.avatar) await assertOwnedUploadPurpose(request.user.id, updates.avatar, "avatar");
+  if (updates.coverPhoto) await assertOwnedUploadPurpose(request.user.id, updates.coverPhoto, "avatar");
   const user = await updateUser(request.user.id, updates);
   await audit(request, "edit", "user", request.user.id, { fields: Object.keys(updates) });
   response.json({ success: true, data: user });
