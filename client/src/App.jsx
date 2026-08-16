@@ -6,6 +6,7 @@ import { useAuthStore } from "./store/authStore.js";
 import { useTheme } from "./hooks/useTheme.js";
 import { useRealtime } from "./hooks/useRealtime.js";
 import AuthPage from "./components/auth/AuthPage.jsx";
+import EmailVerification from "./components/auth/EmailVerification.jsx";
 import AppShell from "./components/layout/AppShell.jsx";
 
 function Splash() {
@@ -47,6 +48,16 @@ export default function App() {
       <AnimatePresence mode="wait">
         <motion.div key="auth" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
           <AuthPage />
+        </motion.div>
+      </AnimatePresence>
+    );
+  }
+
+  if (!user.verified) {
+    return (
+      <AnimatePresence mode="wait">
+        <motion.div key="verify-email" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+          <EmailVerification />
         </motion.div>
       </AnimatePresence>
     );

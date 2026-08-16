@@ -70,6 +70,11 @@ export function useRealtime() {
     socket.on("call:unavailable", endCall);
     socket.on("call:rejected", endCall);
     socket.on("call:accepted", refreshCalls);
+    const accountDisabled = () => {
+      disconnectSocket();
+      useAuthStore.getState().clearSession();
+    };
+    socket.on("auth:disabled", accountDisabled);
 
     return () => {
       socket.off("message:new", updateTimeline);
@@ -84,6 +89,7 @@ export function useRealtime() {
       socket.off("call:unavailable", endCall);
       socket.off("call:rejected", endCall);
       socket.off("call:accepted", refreshCalls);
+      socket.off("auth:disabled", accountDisabled);
       disconnectSocket();
     };
   }, [token, queryClient, setActiveCall]);

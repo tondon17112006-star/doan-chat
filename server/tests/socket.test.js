@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { friendAction, getCalls, getNotifications, resetMemoryData } from "../services/dataService.js";
+import { friendAction, getCalls, getNotifications, resetMemoryData, updateSettings } from "../services/dataService.js";
 import { registerSocketHandlers } from "../sockets/index.js";
 import { signAccessToken } from "../utils/tokens.js";
 
@@ -96,6 +96,23 @@ describe("conversation Socket.IO authorization", () => {
     expect((await getCalls("u-maya"))[0]).toMatchObject({ status: "missed", direction: "incoming" });
     expect((await getNotifications("u-maya")).some((notification) => notification.type === "call" && notification.data?.callId === "offline-call-123")).toBe(true);
     expect(io.emitted).not.toContainEqual(expect.objectContaining({ room: "u-maya", event: "call:incoming" }));
+  });
+
+  it("does not create an offline call notification when calls are disabled", async () => {
+    await updateSettings("u-maya", { notifications: { calls: false } });
+    const io = createIo();
+    registerSocketHandlers(io);
+    const alex = createSocket("u-alex", io);
+    await authenticateAndConnect(io, alex);
+
+    await alex.handlers.get("call:start")({
+      callId: "silent-offline-call-123",
+      conversationId: "c-maya",
+      participants: ["u-maya"],
+      type: "voice",
+    });
+
+    expect((await getNotifications("u-maya")).some((notification) => notification.type === "call" && notification.data?.callId === "silent-offline-call-123")).toBe(false);
   });
 
   it("never exposes credential fields in a call signal", async () => {

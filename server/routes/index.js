@@ -4,12 +4,13 @@ import * as authController from "../controllers/authController.js";
 import * as conversationController from "../controllers/conversationController.js";
 import * as messageController from "../controllers/messageController.js";
 import * as miscController from "../controllers/miscController.js";
+import * as moderationController from "../controllers/moderationController.js";
 import * as socialController from "../controllers/socialController.js";
 import * as userController from "../controllers/userController.js";
-import { authenticate, authorize } from "../middlewares/auth.js";
+import { authenticate, authorize, requireVerified } from "../middlewares/auth.js";
 import { upload } from "../middlewares/upload.js";
 import { validate } from "../middlewares/validate.js";
-import { forgotPasswordRateLimits, loginRateLimits } from "../middlewares/authRateLimit.js";
+import { forgotPasswordRateLimits, loginRateLimits, verificationRateLimits } from "../middlewares/authRateLimit.js";
 
 export const apiRouter = Router();
 
@@ -43,7 +44,7 @@ apiRouter.post(
   validate,
   authController.verifyOtp,
 );
-apiRouter.post("/auth/send-verification", body("email").isEmail().normalizeEmail(), validate, authController.sendVerification);
+apiRouter.post("/auth/send-verification", ...verificationRateLimits, body("email").isEmail().normalizeEmail(), validate, authController.sendVerification);
 apiRouter.post("/auth/logout", authenticate, authController.logout);
 apiRouter.get("/auth/sessions", authenticate, authController.sessions);
 apiRouter.delete("/auth/sessions/:id", param("id").isUUID(), validate, authenticate, authController.revokeSession);
@@ -76,6 +77,7 @@ apiRouter.patch(
 );
 apiRouter.patch(
   "/users/me/email",
+  requireVerified,
   body("email").isEmail().normalizeEmail(),
   body("password").isString().notEmpty(),
   validate,
@@ -90,6 +92,7 @@ apiRouter.get("/friends/requests/sent", socialController.sentRequests);
 apiRouter.get("/conversations", conversationController.list);
 apiRouter.post(
   "/conversations",
+  requireVerified,
   body("type").isIn(["direct", "group"]),
   body("participants").isArray({ min: 1, max: 100 }),
   body("participants.*").isString().trim().isLength({ min: 1, max: 200 }),
@@ -99,6 +102,7 @@ apiRouter.post(
 apiRouter.get("/conversations/:id", conversationController.getOne);
 apiRouter.patch(
   "/conversations/:id",
+  requireVerified,
   body("name").optional().isString().isLength({ min: 1, max: 100 }),
   body("avatar").optional().isString().isLength({ max: 2_000 }),
   body("color").optional().isString().isLength({ min: 1, max: 40 }),
@@ -108,12 +112,13 @@ apiRouter.patch(
   validate,
   conversationController.update,
 );
-apiRouter.post("/conversations/:id/leave", conversationController.leave);
-apiRouter.delete("/conversations/:id", conversationController.remove);
+apiRouter.post("/conversations/:id/leave", requireVerified, conversationController.leave);
+apiRouter.delete("/conversations/:id", requireVerified, conversationController.remove);
 
 apiRouter.get("/messages/:conversationId", query("limit").optional().isInt({ min: 1, max: 100 }), validate, messageController.list);
 apiRouter.post(
   "/messages/:conversationId",
+  requireVerified,
   body("type").optional().isIn(["text", "image", "video", "audio", "file", "system"]),
   body("content").optional({ nullable: true }).isString().isLength({ max: 4_000 }),
   body("attachments").optional().isArray({ max: 10 }),
@@ -121,28 +126,69 @@ apiRouter.post(
   messageController.create,
 );
 apiRouter.post("/messages/:conversationId/read", messageController.read);
-apiRouter.patch("/messages/item/:id", body("content").isString().trim().isLength({ min: 1, max: 4_000 }), validate, messageController.edit);
-apiRouter.delete("/messages/item/:id", messageController.remove);
-apiRouter.post("/messages/item/:id/reaction", body("emoji").optional({ nullable: true }).isString().isLength({ max: 16 }), validate, messageController.react);
-apiRouter.post("/messages/item/:id/pin", messageController.pin);
+apiRouter.patch("/messages/item/:id", requireVerified, body("content").isString().trim().isLength({ min: 1, max: 4_000 }), validate, messageController.edit);
+apiRouter.delete("/messages/item/:id", requireVerified, messageController.remove);
+apiRouter.post("/messages/item/:id/reaction", requireVerified, body("emoji").optional({ nullable: true }).isString().isLength({ max: 16 }), validate, messageController.react);
+apiRouter.post("/messages/item/:id/pin", requireVerified, messageController.pin);
 
 apiRouter.post(
   "/uploads",
+  requireVerified,
   query("purpose").optional().isIn(["attachment", "avatar", "story"]),
   validate,
   upload.array("files", 10),
   miscController.uploadFiles,
 );
 apiRouter.get("/uploads/:filename", param("filename").matches(/^[a-f0-9-]+\.[a-z0-9]+$/i), validate, miscController.downloadUpload);
-apiRouter.post("/friends/:id", body("action").isIn(["request", "accept", "decline", "cancel", "remove", "block", "unblock"]), validate, socialController.friend);
+apiRouter.post("/friends/:id", requireVerified, body("action").isIn(["request", "accept", "decline", "cancel", "remove", "block", "unblock"]), validate, socialController.friend);
 apiRouter.get("/stories", socialController.stories);
-apiRouter.post("/stories", body("mediaUrl").isString().notEmpty(), body("type").optional().isIn(["image", "video"]), validate, socialController.addStory);
-apiRouter.post("/stories/:id/view", socialController.seeStory);
+apiRouter.post("/stories", requireVerified, body("mediaUrl").isString().notEmpty(), body("type").optional().isIn(["image", "video"]), validate, socialController.addStory);
+apiRouter.post("/stories/:id/view", requireVerified, socialController.seeStory);
 apiRouter.get("/notifications", socialController.notifications);
 apiRouter.post("/notifications/read", socialController.readNotifications);
 apiRouter.get("/calls", socialController.calls);
-apiRouter.post("/calls", socialController.addCall);
+apiRouter.post("/calls", requireVerified, socialController.addCall);
+apiRouter.post(
+  "/reports",
+  requireVerified,
+  body("targetType").isIn(["user", "message", "story"]),
+  body("targetId").isString().trim().isLength({ min: 1, max: 200 }),
+  body("reason").isString().trim().isLength({ min: 3, max: 200 }),
+  body("details").optional().isString().isLength({ max: 1_000 }),
+  validate,
+  moderationController.create,
+);
 apiRouter.get("/search", query("q").optional().isString().isLength({ max: 100 }), validate, miscController.search);
 apiRouter.get("/settings", miscController.settings);
 apiRouter.patch("/settings", miscController.saveSettings);
-apiRouter.get("/admin/dashboard", authorize("admin"), miscController.dashboard);
+apiRouter.get("/admin/dashboard", requireVerified, authorize("admin"), miscController.dashboard);
+apiRouter.get("/admin/reports", requireVerified, authorize("admin"), query("status").optional().isIn(["open", "in_review", "resolved", "dismissed"]), validate, moderationController.list);
+apiRouter.patch(
+  "/admin/reports/:id",
+  requireVerified,
+  authorize("admin"),
+  param("id").isString().trim().isLength({ min: 1, max: 200 }),
+  body("status").isIn(["open", "in_review", "resolved", "dismissed"]),
+  body("resolution").optional().isString().isLength({ max: 1_000 }),
+  validate,
+  moderationController.update,
+);
+apiRouter.post(
+  "/admin/reports/:id/resolve",
+  requireVerified,
+  authorize("admin"),
+  param("id").isString().trim().isLength({ min: 1, max: 200 }),
+  body("resolution").optional().isString().isLength({ max: 1_000 }),
+  validate,
+  moderationController.resolve,
+);
+apiRouter.get("/admin/users", requireVerified, authorize("admin"), moderationController.users);
+apiRouter.patch(
+  "/admin/users/:id/disabled",
+  requireVerified,
+  authorize("admin"),
+  param("id").isString().trim().isLength({ min: 1, max: 200 }),
+  body("disabled").isBoolean(),
+  validate,
+  moderationController.updateUserStatus,
+);

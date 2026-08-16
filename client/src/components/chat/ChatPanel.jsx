@@ -11,7 +11,7 @@ import {
   HiOutlineInformationCircle,
   HiSparkles
 } from "react-icons/hi2";
-import { chatApi } from "../../services/api.js";
+import { chatApi, socialApi } from "../../services/api.js";
 import { getSocket } from "../../services/socket.js";
 import { useSocketStatus } from "../../hooks/useSocketStatus.js";
 import { useAuthStore } from "../../store/authStore.js";
@@ -46,6 +46,7 @@ export default function ChatPanel() {
     queryFn: () => chatApi.messages(conversationId, { limit: 60 }),
     enabled: Boolean(conversationId)
   });
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: socialApi.settings });
   const sendMutation = useMutation({
     mutationFn: ({ payload }) => chatApi.send(conversationId, payload),
     retry: (failureCount, error) => ![400, 401, 403, 404, 413, 422].includes(error?.response?.status) && failureCount < 2,
@@ -171,9 +172,10 @@ export default function ChatPanel() {
       : otherUser?.isOnline
         ? "Active now"
         : formatLastSeen(otherUser?.lastSeen);
+  const wallpaper = ["aurora", "mist", "blush", "night", "paper"].includes(settings?.chatWallpaper) ? settings.chatWallpaper : "aurora";
 
   return (
-    <section className={`chat-panel ${detailOpen ? "details-visible" : ""}`}>
+    <section className={`chat-panel chat-wallpaper-${wallpaper} ${detailOpen ? "details-visible" : ""}`}>
       <div className="chat-main">
         <header className="chat-header">
           <button type="button" className="mobile-back" onClick={() => navigate("/chat")} aria-label="Back to messages">

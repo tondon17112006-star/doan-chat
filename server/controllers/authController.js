@@ -17,7 +17,7 @@ export const register = asyncHandler(async (request, response) => {
   const result = await authService.register(request.body, request);
   response.cookie("lumina_refresh", result.refreshToken, cookieOptions(request.body.remember));
   await audit({ ...request, user: result.user }, "login", "user", result.user.id, { kind: "register" });
-  response.status(201).json({ success: true, data: { user: result.user, accessToken: result.accessToken } });
+  response.status(201).json({ success: true, data: { user: result.user, accessToken: result.accessToken, verification: result.verification } });
 });
 
 export const login = asyncHandler(async (request, response) => {
@@ -49,13 +49,27 @@ export const logout = asyncHandler(async (request, response) => {
 });
 
 export const forgotPassword = asyncHandler(async (request, response) => {
-  const result = await authService.startOtp(request.body.email, "reset");
+  let result = {};
+  try {
+    result = await authService.startOtp(request.body.email, "reset");
+  } catch (error) {
+    // Do not turn a mail delivery configuration failure into an account
+    // existence oracle in production.
+    if (!env.isProduction) throw error;
+  }
   response.json({ success: true, data: result, message: "If that account exists, an OTP has been sent." });
 });
 
 export const sendVerification = asyncHandler(async (request, response) => {
-  const result = await authService.startOtp(request.body.email, "verify");
-  response.json({ success: true, data: result });
+  let result = {};
+  try {
+    result = await authService.sendVerificationOtp(request.body.email);
+  } catch (error) {
+    // For a public resend endpoint, production must not make an address
+    // discoverable through SMTP/configuration failures.
+    if (!env.isProduction) throw error;
+  }
+  response.json({ success: true, data: result, message: "If that account needs verification, an OTP has been sent." });
 });
 
 export const verifyOtp = asyncHandler(async (request, response) => {

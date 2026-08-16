@@ -9,6 +9,7 @@ export { Friendship } from "./Friendship.js";
 export { Block } from "./Block.js";
 export { Upload } from "./Upload.js";
 export { Call } from "./Call.js";
+export { Report } from "./Report.js";
 
 import { User } from "./User.js";
 import { Conversation } from "./Conversation.js";
@@ -21,8 +22,9 @@ import { Friendship } from "./Friendship.js";
 import { Block } from "./Block.js";
 import { Upload } from "./Upload.js";
 import { Call } from "./Call.js";
+import { Report } from "./Report.js";
 
-export const mongoModels = [User, Conversation, Message, Story, Notification, Settings, RefreshSession, Friendship, Block, Upload, Call];
+export const mongoModels = [User, Conversation, Message, Story, Notification, Settings, RefreshSession, Friendship, Block, Upload, Call, Report];
 
 export async function ensureMongoIndexes() {
   await Promise.all(mongoModels.map((model) => model.init()));

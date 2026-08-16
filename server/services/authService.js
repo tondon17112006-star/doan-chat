@@ -170,6 +170,12 @@ async function revokeUserSessions(userId, exceptSessionId = null) {
   return removed.length;
 }
 
+export async function revokeAllSessionsForUser(userId) {
+  const revoked = await revokeUserSessions(userId);
+  await updateUser(userId, { isOnline: false, lastSeen: now() });
+  return revoked;
+}
+
 async function sessionResult(user, request, previousSession = null, previousSessionConsumed = false) {
   if (previousSession && !previousSessionConsumed) await removeSession(previousSession.id, user.id);
   const device = request.body?.device || {};
@@ -196,9 +202,15 @@ async function sessionResult(user, request, previousSession = null, previousSess
 }
 
 export async function register(input, request) {
-  if (await findUserByEmail(input.email, true)) throw new AppError("An account with this email already exists.", 409);
+  const email = String(input.email || "").trim().toLowerCase();
+  if (await findUserByEmail(email, true)) {
+    throw new AppError(env.isProduction ? "Unable to create an account with these details." : "An account with this email already exists.", 409);
+  }
+  // Send before persisting the account so a production SMTP failure does not
+  // leave a newly-created account with no way to receive its first OTP.
+  const verification = await issueOtp(email, "verify");
   const user = await createUser(input);
-  return sessionResult(user, request);
+  return { ...await sessionResult(user, request), verification };
 }
 
 export async function login(input, request) {
@@ -265,10 +277,7 @@ export async function revokeOtherSessionsAfterPasswordChange(userId, currentRefr
   return revokeUserSessions(userId, currentSession?.userId === String(userId) ? currentSessionId : null);
 }
 
-export async function startOtp(email, purpose) {
-  const normalizedEmail = String(email || "").trim().toLowerCase();
-  const user = await findUserByEmail(normalizedEmail, true);
-  if (!user) return {};
+async function issueOtp(normalizedEmail, purpose) {
   const otp = String(crypto.randomInt(100_000, 1_000_000));
   const entry = { otp, purpose, expiresAt: Date.now() + 10 * 60_000, attempts: 0 };
   otpStore.set(otpKey(normalizedEmail, purpose), entry);
@@ -287,6 +296,22 @@ export async function startOtp(email, purpose) {
     }
   }
   return env.isProduction ? {} : { debugOtp: otp };
+}
+
+export async function startOtp(email, purpose) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const user = await findUserByEmail(normalizedEmail, true);
+  if (!user) return {};
+  return issueOtp(normalizedEmail, purpose);
+}
+
+export async function sendVerificationOtp(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const user = await findUserByEmail(normalizedEmail, true);
+  // Keep this endpoint indistinguishable for an unknown or already-verified
+  // address. The controller returns the same generic confirmation in either case.
+  if (!user || user.verified) return {};
+  return issueOtp(normalizedEmail, "verify");
 }
 
 export async function verifyOtp(email, otp, purpose, newPassword) {
@@ -310,18 +335,19 @@ export async function verifyOtp(email, otp, purpose, newPassword) {
 
   const user = await findUserByEmail(normalizedEmail, true);
   if (!user) throw new AppError("OTP is invalid or expired.", 400);
+  let updated;
   if (purpose === "reset") {
     if (typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128) {
       throw new AppError("A new password must be between 8 and 128 characters.", 422);
     }
-    await updatePassword(user.id, newPassword);
+    updated = await updatePassword(user.id, newPassword);
     await revokeUserSessions(user.id);
   } else {
-    await updateUser(user.id, { verified: true });
+    updated = await updateUser(user.id, { verified: true });
   }
   otpStore.delete(key);
   if (redis) await redis.del(key);
-  return { verified: true };
+  return { verified: purpose === "verify", user: updated };
 }
 
 export async function getSessions(userId, currentRefreshToken) {

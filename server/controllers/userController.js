@@ -1,10 +1,10 @@
 // File: server/controllers/userController.js
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { assertOwnedUploadPurpose, compareUserPassword, findUserByEmail, findUserById, listUsers, updatePassword, updateUser } from "../services/dataService.js";
+import { assertOwnedUploadPurpose, compareUserPassword, findUserByEmail, findUserById, getUserProfile, listUsers, updatePassword, updateUser } from "../services/dataService.js";
 import { AppError } from "../utils/AppError.js";
-import { cleanText, publicUser } from "../utils/helpers.js";
+import { cleanText } from "../utils/helpers.js";
 import { audit } from "../services/auditService.js";
-import { revokeOtherSessionsAfterPasswordChange } from "../services/authService.js";
+import { revokeOtherSessionsAfterPasswordChange, sendVerificationOtp } from "../services/authService.js";
 
 export const me = asyncHandler(async (request, response) => {
   response.json({ success: true, data: request.user });
@@ -15,9 +15,9 @@ export const list = asyncHandler(async (request, response) => {
 });
 
 export const profile = asyncHandler(async (request, response) => {
-  const user = await findUserById(request.params.id);
+  const user = await getUserProfile(request.params.id, request.user.id);
   if (!user) throw new AppError("User not found.", 404);
-  response.json({ success: true, data: publicUser(user) });
+  response.json({ success: true, data: user });
 });
 
 export const updateProfile = asyncHandler(async (request, response) => {
@@ -56,5 +56,6 @@ export const changeEmail = asyncHandler(async (request, response) => {
   const selectedUser = await findUserByEmail(user.email, true);
   if (!(await compareUserPassword(selectedUser, request.body.password))) throw new AppError("Password is incorrect.", 400);
   const updated = await updateUser(request.user.id, { email: request.body.email.toLowerCase(), verified: false });
-  response.json({ success: true, data: updated });
+  const verification = await sendVerificationOtp(updated.email);
+  response.json({ success: true, data: { user: updated, verification } });
 });

@@ -15,6 +15,7 @@ import PageFrame from "./PageFrame.jsx";
 import Avatar from "../common/Avatar.jsx";
 import { chatApi, socialApi } from "../../services/api.js";
 import { useDebounce } from "../../hooks/useDebounce.js";
+import { relationshipActionsFor } from "../../utils/relationships.js";
 
 export default function PeoplePage() {
   const [query, setQuery] = useState("");
@@ -101,6 +102,7 @@ function PersonRow({ person, onAction, onMessage, pending }) {
 
 function RelationshipActions({ person, onAction, onMessage, pending }) {
   const relationship = person.relationship || "none";
+  const actions = relationshipActionsFor(relationship);
   const disabled = pending;
   const action = (event, name) => {
     event.stopPropagation();
@@ -122,7 +124,7 @@ function RelationshipActions({ person, onAction, onMessage, pending }) {
     return <div className="people-actions"><button type="button" className="requested" disabled><HiCheck /> Requested</button><button type="button" onClick={(event) => action(event, "cancel")} disabled={disabled}>Cancel</button><button type="button" className="danger" onClick={(event) => action(event, "block")} disabled={disabled}><HiNoSymbol /> Block</button></div>;
   }
   if (relationship === "friends") {
-    return <div className="people-actions"><button type="button" onClick={message} disabled={disabled}><HiOutlineChatBubbleOvalLeft /> Message</button><button type="button" className="danger" onClick={(event) => action(event, "block")} disabled={disabled}><HiNoSymbol /> Block</button></div>;
+    return <div className="people-actions"><button type="button" onClick={message} disabled={disabled}><HiOutlineChatBubbleOvalLeft /> Message</button>{actions.includes("remove") && <button type="button" onClick={(event) => action(event, "remove")} disabled={disabled}>Unfriend</button>}<button type="button" className="danger" onClick={(event) => action(event, "block")} disabled={disabled}><HiNoSymbol /> Block</button></div>;
   }
   return <div className="people-actions"><button type="button" onClick={(event) => action(event, "request")} disabled={disabled}><HiOutlineUserPlus /> Add friend</button><button type="button" onClick={message} disabled={disabled}><HiOutlineChatBubbleOvalLeft /> Message</button><button type="button" className="danger" onClick={(event) => action(event, "block")} disabled={disabled}><HiNoSymbol /> Block</button></div>;
 }

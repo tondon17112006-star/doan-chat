@@ -42,7 +42,7 @@ export const create = asyncHandler(async (request, response) => {
     name: cleanText(request.body.name, 100),
   });
   if (!conversation) throw new AppError("Conversation could not be created.", 403);
-  request.app.get("io")?.to(conversation.participants).emit("group:update", conversation);
+  request.app.get("io")?.to(conversation.participants).emit("group:update", { id: conversation.id });
   response.status(201).json({ success: true, data: conversation });
 });
 
@@ -71,7 +71,7 @@ export const update = asyncHandler(async (request, response) => {
   const removedParticipants = current.participants.filter((id) => !conversation.participants.map(String).includes(String(id)));
   removeSocketsFromConversation(request.app.get("io"), removedParticipants, conversation.id);
   if (requestedGroupFields.length) {
-    request.app.get("io")?.to([...new Set([...current.participants, ...conversation.participants])]).emit("group:update", conversation);
+    request.app.get("io")?.to([...new Set([...current.participants, ...conversation.participants])]).emit("group:update", { id: conversation.id });
   } else {
     request.app.get("io")?.to(String(request.user.id)).emit("group:update", conversation);
   }
@@ -86,7 +86,7 @@ export const leave = asyncHandler(async (request, response) => {
   if (!result) throw new AppError("Conversation not found.", 404);
   removeSocketsFromConversation(request.app.get("io"), [request.user.id], result.id);
   if (!result.deleted) {
-    request.app.get("io")?.to([...new Set([...conversation.participants, ...result.participants])]).emit("group:update", result);
+    request.app.get("io")?.to([...new Set([...conversation.participants, ...result.participants])]).emit("group:update", { id: result.id });
   }
   response.json({ success: true, data: { id: conversation.id, left: true, deleted: Boolean(result.deleted), admins: result.admins } });
 });

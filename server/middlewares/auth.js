@@ -17,6 +17,7 @@ export const authenticate = asyncHandler(async (request, _response, next) => {
   }
   const user = await findUserById(payload.sub);
   if (!user) throw new AppError("Account not found.", 401);
+  if (user.disabled) throw new AppError("This account has been disabled.", 403);
   request.user = publicUser(user);
   next();
 });
@@ -26,4 +27,13 @@ export function authorize(...roles) {
     if (!roles.includes(request.user?.role)) return next(new AppError("You do not have permission to do this.", 403));
     next();
   };
+}
+
+// An unverified account may sign in so its owner can complete the verification
+// flow, but it must not be able to create or change shared content meanwhile.
+export function requireVerified(request, _response, next) {
+  if (!request.user?.verified) {
+    return next(new AppError("Please verify your email before using this feature.", 403));
+  }
+  next();
 }

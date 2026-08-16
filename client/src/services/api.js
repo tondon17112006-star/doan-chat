@@ -62,6 +62,7 @@ export const authApi = {
   logoutOtherSessions: () => unwrap(api.post("/auth/logout-others")),
   changePassword: (payload) => unwrap(api.patch("/users/me/password", payload)),
   forgotPassword: (email) => unwrap(api.post("/auth/forgot-password", { email })),
+  sendVerification: (email) => unwrap(api.post("/auth/send-verification", { email })),
   verifyOtp: (payload) => unwrap(api.post("/auth/verify-otp", payload))
 };
 
@@ -99,10 +100,16 @@ export const socialApi = {
   readNotifications: () => api.post("/notifications/read"),
   calls: () => unwrap(api.get("/calls")),
   addCall: (payload) => unwrap(api.post("/calls", payload)),
+  createReport: (payload) => unwrap(api.post("/reports", payload)),
   search: (q) => unwrap(api.get("/search", { params: { q } })),
   settings: () => unwrap(api.get("/settings")),
   saveSettings: (payload) => unwrap(api.patch("/settings", payload)),
-  dashboard: () => unwrap(api.get("/admin/dashboard"))
+  dashboard: () => unwrap(api.get("/admin/dashboard")),
+  adminReports: (status) => unwrap(api.get("/admin/reports", { params: status ? { status } : undefined })),
+  updateAdminReport: (id, payload) => unwrap(api.patch(`/admin/reports/${id}`, payload)),
+  resolveAdminReport: (id, resolution = "") => unwrap(api.post(`/admin/reports/${id}/resolve`, { resolution })),
+  adminUsers: () => unwrap(api.get("/admin/users")),
+  setUserDisabled: (id, disabled) => unwrap(api.patch(`/admin/users/${id}/disabled`, { disabled }))
 };
 
 function deviceInfo() {

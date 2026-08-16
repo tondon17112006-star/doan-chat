@@ -23,7 +23,7 @@ export const stories = asyncHandler(async (request, response) => {
 export const addStory = asyncHandler(async (request, response) => {
   await assertOwnedUploadPurpose(request.user.id, request.body.mediaUrl, "story");
   const story = await createStory(request.user.id, request.body);
-  request.app.get("io")?.emit("story:new", story);
+  request.app.get("io")?.emit("story:new", { id: story.id });
   response.status(201).json({ success: true, data: story });
 });
 

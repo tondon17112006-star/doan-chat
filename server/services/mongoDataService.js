@@ -8,6 +8,7 @@ import {
   Friendship,
   Message,
   Notification,
+  Report,
   Settings,
   Story,
   Upload,
@@ -94,21 +95,69 @@ async function publicUserById(id) {
   return user ? publicUser(record(user)) : null;
 }
 
+async function settingsForUser(userId, session = null) {
+  const settings = record(await Settings.findById(String(userId)).session(session || null).lean());
+  return structuredClone(settings?.value || defaultSettings());
+}
+
+async function canViewPrivacySetting(viewerId, targetId, setting) {
+  if (String(viewerId) === String(targetId)) return true;
+  if (setting === "everyone") return true;
+  if (setting !== "friends") return false;
+  return Boolean(await Friendship.exists({ pairKey: pairKey(viewerId, targetId), status: "accepted" }));
+}
+
+async function presentUserForViewer(user, viewerId) {
+  const result = publicUser(user);
+  if (!result || String(result.id) === String(viewerId)) return result;
+  const privacy = (await settingsForUser(result.id)).privacy || defaultSettings().privacy;
+  if (!(await canViewPrivacySetting(viewerId, result.id, privacy.profilePhoto))) {
+    result.avatar = "";
+    result.coverPhoto = "";
+  }
+  if (!(await canViewPrivacySetting(viewerId, result.id, privacy.lastSeen))) result.lastSeen = null;
+  return result;
+}
+
+async function readReceiptVisibleTo(viewerId, readerId) {
+  if (String(viewerId) === String(readerId)) return true;
+  return (await settingsForUser(readerId)).privacy?.readReceipts !== false;
+}
+
+function notificationSettingForType(type) {
+  if (type === "message") return "messages";
+  if (type === "call") return "calls";
+  if (type === "friend-request" || type === "friend-accepted") return "friendRequests";
+  return null;
+}
+
+async function notificationEnabledFor(userId, type, session = null) {
+  const key = notificationSettingForType(type);
+  if (!key) return true;
+  return (await settingsForUser(userId, session)).notifications?.[key] !== false;
+}
+
 async function conversationForUser(id, userId) {
   const conversation = await Conversation.findOne({ _id: String(id), participants: String(userId) }).lean();
   return record(conversation);
 }
 
-async function presentMessage(message, userCache = null) {
+async function presentMessage(message, viewerId, userCache = null) {
   const value = record(message);
   const sender = userCache?.get(value.senderId) || await publicUserById(value.senderId);
-  return { ...value, conversation: value.conversationId, sender: sender ? publicUser(sender) : null };
+  const visibleReadBy = await Promise.all((value.readBy || []).map(async (readerId) => ((await readReceiptVisibleTo(viewerId, readerId)) ? String(readerId) : null)));
+  const readBy = visibleReadBy.filter(Boolean);
+  if (value.status === "read" && String(value.senderId) === String(viewerId) && !readBy.some((readerId) => readerId !== String(value.senderId))) {
+    value.status = "delivered";
+    delete value.readAt;
+  }
+  return { ...value, readBy, conversation: value.conversationId, sender: sender ? await presentUserForViewer(sender, viewerId) : null };
 }
 
 async function presentConversation(conversation, userId) {
   const value = record(conversation);
   const userMap = await findUsers(value.participants || []);
-  const participantUsers = (value.participants || []).map(String).map((id) => userMap.get(id)).filter(Boolean).map(publicUser);
+  const participantUsers = await Promise.all((value.participants || []).map(String).map((id) => userMap.get(id)).filter(Boolean).map((user) => presentUserForViewer(user, userId)));
   const other = participantUsers.find((user) => user.id !== String(userId));
   const latest = await Message.findOne({ conversationId: value.id, unsentAt: null }).sort({ createdAt: -1 }).lean();
   const latestValue = record(latest);
@@ -178,6 +227,7 @@ async function latestFriendship(firstUserId, secondUserId) {
 }
 
 async function createRelationshipNotification(userId, actorId, kind, session = null) {
+  if (!(await notificationEnabledFor(userId, kind, session))) return null;
   const actor = await publicUserById(actorId);
   const notification = {
     id: makeId("n"),
@@ -195,7 +245,7 @@ async function createRelationshipNotification(userId, actorId, kind, session = n
 async function relationshipResult(action, actorId, target, friendship, notification = null) {
   return {
     action,
-    user: { ...publicUser(target), relationship: await relationshipFor(actorId, target.id) },
+    user: { ...await presentUserForViewer(target, actorId), relationship: await relationshipFor(actorId, target.id) },
     friendship: friendship ? structuredClone(friendship) : null,
     notification,
     affectedUserIds: unique([actorId, target.id]),
@@ -212,6 +262,11 @@ export async function findUserByEmail(email, withPassword = false) {
 
 export async function findUserById(id) {
   return record(await User.findById(String(id)).select("+email +passwordHash").lean());
+}
+
+export async function getUserProfile(id, viewerId) {
+  const user = record(await User.findById(String(id)).select("+email").lean());
+  return user ? presentUserForViewer(user, viewerId) : null;
 }
 
 export async function createUser(input) {
@@ -232,7 +287,7 @@ export async function listUsers(query = "", currentUserId) {
   const filter = { _id: { $ne: String(currentUserId) }, role: { $ne: "assistant" } };
   if (term) filter.$or = ["username", "email", "location"].map((field) => ({ [field]: { $regex: term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } }));
   const users = (await User.find(filter).select("+email").sort({ username: 1 }).limit(100).lean()).map(record);
-  return Promise.all(users.map(async (user) => ({ ...publicUser(user), relationship: await relationshipFor(currentUserId, user.id) })));
+  return Promise.all(users.map(async (user) => ({ ...await presentUserForViewer(user, currentUserId), relationship: await relationshipFor(currentUserId, user.id) })));
 }
 
 export async function updateUser(id, updates) {
@@ -271,7 +326,11 @@ export async function findUploadByFilename(filename) {
 export async function canUserReadUpload(userId, filename) {
   const upload = record(await Upload.findOne({ filename: String(filename) }).lean());
   if (!upload) return false;
-  if (upload.publicDemo || upload.purpose === "avatar" || upload.purpose === "story" || upload.ownerId === String(userId)) return true;
+  if (upload.publicDemo || upload.purpose === "story" || upload.ownerId === String(userId)) return true;
+  if (upload.purpose === "avatar") {
+    const privacy = (await settingsForUser(upload.ownerId)).privacy || defaultSettings().privacy;
+    return canViewPrivacySetting(userId, upload.ownerId, privacy.profilePhoto);
+  }
   return Boolean(await Conversation.exists({ _id: { $in: upload.conversationIds || [] }, participants: String(userId) }));
 }
 
@@ -382,7 +441,7 @@ export async function getMessages(conversationId, userId, before, limit = 60) {
   const hasNext = items.length > pageSize;
   const page = items.slice(0, pageSize).reverse();
   const senderMap = await findUsers(unique(page.map((item) => item.senderId)));
-  return { messages: await Promise.all(page.map((message) => presentMessage(message, senderMap))), nextCursor: hasNext ? record(page[0])?.createdAt : null };
+  return { messages: await Promise.all(page.map((message) => presentMessage(message, userId, senderMap))), nextCursor: hasNext ? record(page[0])?.createdAt : null };
 }
 
 export async function createMessage(userId, conversationId, input) {
@@ -405,14 +464,14 @@ export async function createMessage(userId, conversationId, input) {
     await Conversation.updateOne({ _id: conversation.id }, { $set: { lastMessageAt: now(), lastMessage: value.id } }, sessionOptions(session));
     created = value;
   });
-  return created ? presentMessage(created) : null;
+  return created ? presentMessage(created, userId) : null;
 }
 
 export async function markMessageDelivered(id) {
   const updated = await Message.findOneAndUpdate({ _id: String(id), status: "sent" }, { $set: { status: "delivered" } }, { new: true }).lean();
-  if (updated) return presentMessage(updated);
+  if (updated) return presentMessage(updated, record(updated).senderId);
   const existing = await Message.findById(String(id)).lean();
-  return existing ? presentMessage(existing) : null;
+  return existing ? presentMessage(existing, record(existing).senderId) : null;
 }
 
 async function messageWithAccess(id, userId) {
@@ -430,7 +489,7 @@ export async function updateMessage(id, userId, content) {
   const { message, conversation } = await messageWithAccess(id, userId);
   if (!(await messageActionAllowed(message, conversation, userId)) || message.senderId !== String(userId) || message.unsentAt) return null;
   const updated = await Message.findByIdAndUpdate(String(id), { $set: { content, editedAt: now() } }, { new: true, runValidators: true }).lean();
-  return presentMessage(updated);
+  return presentMessage(updated, userId);
 }
 
 export async function deleteMessage(id, userId, everyone) {
@@ -438,7 +497,7 @@ export async function deleteMessage(id, userId, everyone) {
   if (!(await messageActionAllowed(message, conversation, userId))) return null;
   const payload = everyone && message.senderId === String(userId) ? { content: "", attachments: [], unsentAt: now() } : { deletedFor: unique([...(message.deletedFor || []), String(userId)]) };
   const updated = await Message.findByIdAndUpdate(String(id), { $set: payload }, { new: true, runValidators: true }).lean();
-  return presentMessage(updated);
+  return presentMessage(updated, userId);
 }
 
 export async function reactToMessage(id, userId, emoji) {
@@ -451,21 +510,21 @@ export async function reactToMessage(id, userId, emoji) {
     reaction.users.push(String(userId));
   }
   const updated = await Message.findByIdAndUpdate(String(id), { $set: { reactions } }, { new: true, runValidators: true }).lean();
-  return presentMessage(updated);
+  return presentMessage(updated, userId);
 }
 
 export async function togglePinnedMessage(id, userId) {
   const { message, conversation } = await messageWithAccess(id, userId);
   if (!(await messageActionAllowed(message, conversation, userId))) return null;
   const updated = await Message.findByIdAndUpdate(String(id), { $set: { pinned: !message.pinned } }, { new: true }).lean();
-  return presentMessage(updated);
+  return presentMessage(updated, userId);
 }
 
 export async function markConversationRead(conversationId, userId) {
   const conversation = await conversationForUser(conversationId, userId);
-  if (!conversation || (directPeerId(conversation, userId) && await isBlockedBetween(userId, directPeerId(conversation, userId)))) return false;
+  if (!conversation || (directPeerId(conversation, userId) && await isBlockedBetween(userId, directPeerId(conversation, userId)))) return null;
   await Message.updateMany({ conversationId: String(conversationId), senderId: { $ne: String(userId) } }, { $addToSet: { readBy: String(userId) }, $set: { status: "read", readAt: now() } });
-  return true;
+  return { marked: true, shareReceipt: (await settingsForUser(userId)).privacy?.readReceipts !== false };
 }
 
 export async function getStories(userId) {
@@ -473,13 +532,13 @@ export async function getStories(userId) {
   const excluded = blocks.map((block) => block.userId === String(userId) ? block.blockedUserId : block.userId);
   const stories = (await Story.find({ expiresAt: { $gt: now() }, userId: { $nin: excluded } }).sort({ createdAt: -1 }).lean()).map(record);
   const users = await findUsers(unique(stories.map((story) => story.userId)));
-  return stories.map((story) => ({ ...story, user: publicUser(users.get(story.userId)) }));
+  return Promise.all(stories.map(async (story) => ({ ...story, user: await presentUserForViewer(users.get(story.userId), userId) })));
 }
 
 export async function createStory(userId, input) {
   const value = { id: makeId("s"), userId: String(userId), type: input.type === "video" ? "video" : "image", mediaUrl: input.mediaUrl, caption: input.caption || "", viewers: [], reactions: [], expiresAt: new Date(Date.now() + 86_400_000) };
   await Story.create(documentForCreate(value));
-  return { ...value, user: await publicUserById(userId) };
+  return { ...value, user: await getUserProfile(userId, userId) };
 }
 
 export async function viewStory(id, userId, reaction) {
@@ -493,7 +552,7 @@ export async function viewStory(id, userId, reaction) {
 export async function getNotifications(userId) {
   const notifications = (await Notification.find({ userId: String(userId) }).sort({ createdAt: -1 }).lean()).map(record);
   const users = await findUsers(unique(notifications.map((item) => item.actorId).filter(Boolean)));
-  return notifications.map((item) => ({ ...item, actor: publicUser(users.get(item.actorId)) }));
+  return Promise.all(notifications.map(async (item) => ({ ...item, actor: await presentUserForViewer(users.get(item.actorId), userId) })));
 }
 
 export async function markNotificationsRead(userId) {
@@ -501,6 +560,7 @@ export async function markNotificationsRead(userId) {
 }
 
 export async function createRealtimeNotification(userId, actorId, input = {}) {
+  if (!(await notificationEnabledFor(userId, input.type))) return null;
   const value = {
     id: makeId("n"),
     userId: String(userId),
@@ -512,7 +572,7 @@ export async function createRealtimeNotification(userId, actorId, input = {}) {
     read: false,
   };
   const created = await Notification.create(documentForCreate(value));
-  return { ...record(created), actor: await publicUserById(actorId) };
+  return { ...record(created), actor: await getUserProfile(actorId, userId) };
 }
 
 export async function getCalls(userId) {
@@ -520,7 +580,7 @@ export async function getCalls(userId) {
   const users = await findUsers(unique(calls.map((call) => call.peerId)));
   return Promise.all(calls.map(async (call) => {
     const directConversation = call.conversationId ? null : record(await Conversation.findOne({ type: "direct", participants: { $all: [String(userId), String(call.peerId)] } }).lean());
-    return { ...call, conversationId: call.conversationId || directConversation?.id || null, peer: publicUser(users.get(call.peerId)) };
+    return { ...call, conversationId: call.conversationId || directConversation?.id || null, peer: await presentUserForViewer(users.get(call.peerId), userId) };
   }));
 }
 
@@ -531,7 +591,7 @@ export async function createCall(userId, input) {
   const peerId = String(input.peer?.id || input.participants?.[0] || peer || "");
   const value = { id: makeId("call"), userId: String(userId), peerId, conversationId: String(input.conversationId), type: input.type === "video" ? "video" : "voice", status: input.status || "ringing", direction: input.direction === "incoming" ? "incoming" : "outgoing", duration: Math.max(0, Number(input.duration) || 0), ...(input.answeredAt ? { answeredAt: input.answeredAt } : {}), ...(input.endedAt ? { endedAt: input.endedAt } : {}) };
   await Call.create(documentForCreate(value));
-  return { ...value, peer: await publicUserById(peerId) };
+  return { ...value, peer: await getUserProfile(peerId, userId) };
 }
 
 export async function updateCall(id, updates = {}) {
@@ -541,14 +601,14 @@ export async function updateCall(id, updates = {}) {
   }
   if (updates.duration !== undefined) allowed.duration = Math.max(0, Number(updates.duration) || 0);
   const updated = await Call.findByIdAndUpdate(String(id), { $set: allowed }, { new: true, runValidators: true }).lean();
-  return updated ? { ...record(updated), peer: await publicUserById(updated.peerId) } : null;
+  return updated ? { ...record(updated), peer: await getUserProfile(updated.peerId, updated.userId) } : null;
 }
 
 export async function listFriends(userId) {
   const accepted = (await Friendship.find({ $or: [{ requesterId: String(userId) }, { recipientId: String(userId) }], status: "accepted" }).lean()).map(record);
   const friendIds = accepted.map((friendship) => friendship.requesterId === String(userId) ? friendship.recipientId : friendship.requesterId);
   const users = await findUsers(friendIds);
-  return friendIds.map((id) => users.get(id)).filter(Boolean).map((user) => ({ ...publicUser(user), relationship: "friends" }));
+  return Promise.all(friendIds.map((id) => users.get(id)).filter(Boolean).map(async (user) => ({ ...await presentUserForViewer(user, userId), relationship: "friends" })));
 }
 
 export async function listFriendRequests(userId, direction) {
@@ -556,7 +616,7 @@ export async function listFriendRequests(userId, direction) {
   const requests = (await Friendship.find({ [field]: String(userId), status: "pending" }).sort({ updatedAt: -1 }).lean()).map(record);
   const otherIds = requests.map((request) => direction === "sent" ? request.recipientId : request.requesterId);
   const users = await findUsers(otherIds);
-  return Promise.all(requests.map(async (request, index) => ({ ...request, user: { ...publicUser(users.get(otherIds[index])), relationship: await relationshipFor(userId, otherIds[index]) } })));
+  return Promise.all(requests.map(async (request, index) => ({ ...request, user: { ...await presentUserForViewer(users.get(otherIds[index]), userId), relationship: await relationshipFor(userId, otherIds[index]) } })));
 }
 
 export async function friendAction(userId, targetId, action) {
@@ -642,9 +702,9 @@ export async function searchEverything(userId, query) {
     User.find({ _id: { $ne: String(userId) }, $or: [{ username: expression }, { email: expression }] }).select("+email").limit(8).lean(),
     Message.find({ conversationId: { $in: conversationIds }, content: expression }).sort({ createdAt: -1 }).limit(12).lean(),
   ]);
-  const presentedMessages = await Promise.all(messages.map((message) => presentMessage(message)));
+  const presentedMessages = await Promise.all(messages.map((message) => presentMessage(message, userId)));
   return {
-    users: users.map((user) => publicUser(record(user))),
+    users: await Promise.all(users.map((user) => presentUserForViewer(record(user), userId))),
     conversations: await Promise.all(conversations.map((conversation) => presentConversation(conversation, userId))),
     messages: presentedMessages,
     files: messages.flatMap((message) => (message.attachments || []).map((file) => ({ ...file, conversationId: message.conversationId }))).filter((file) => `${file.name} ${file.type}`.toLowerCase().includes(term.toLowerCase())).slice(0, 12),
@@ -670,18 +730,91 @@ export async function updateSettings(userId, updates) {
   return structuredClone(value);
 }
 
+const openReportStatuses = new Set(["open", "in_review"]);
+
+async function reportTarget(targetType, targetId) {
+  if (targetType === "user") return findUserById(targetId);
+  if (targetType === "message") return record(await Message.findById(String(targetId)).lean());
+  if (targetType === "story") return record(await Story.findById(String(targetId)).lean());
+  return null;
+}
+
+async function presentReport(report) {
+  const value = record(report);
+  if (!value) return null;
+  const [reporter, target] = await Promise.all([publicUserById(value.reporterId), reportTarget(value.targetType, value.targetId)]);
+  return {
+    ...value,
+    reporter,
+    target: target ? (value.targetType === "user" ? publicUser(target) : { id: target.id, userId: target.userId || target.senderId, content: target.content || target.caption || "" }) : null,
+  };
+}
+
+export async function createReport(reporterId, input) {
+  const [reporter, target] = await Promise.all([findUserById(reporterId), reportTarget(input.targetType, input.targetId)]);
+  if (!reporter || !target) throw new AppError("The reported item was not found.", 404);
+  const targetOwnerId = input.targetType === "user" ? target.id : (target.userId || target.senderId);
+  if (String(targetOwnerId) === String(reporterId)) throw new AppError("You cannot report your own content.", 422);
+  const existing = await Report.exists({ reporterId: String(reporterId), targetType: input.targetType, targetId: String(input.targetId), status: { $in: [...openReportStatuses] } });
+  if (existing) throw new AppError("You already have an open report for this item.", 409);
+  try {
+    const created = await Report.create(documentForCreate({
+      id: makeId("r"), reporterId: String(reporterId), targetType: input.targetType, targetId: String(input.targetId),
+      reason: String(input.reason).trim(), details: String(input.details || "").trim(), status: "open", resolution: "", resolvedBy: null, resolvedAt: null,
+    }));
+    return presentReport(created);
+  } catch (error) {
+    if (error?.code === 11000) throw new AppError("You already have an open report for this item.", 409);
+    throw error;
+  }
+}
+
+export async function listReports(status) {
+  const filter = status ? { status } : {};
+  const reports = await Report.find(filter).sort({ createdAt: -1 }).limit(100).lean();
+  return Promise.all(reports.map(presentReport));
+}
+
+export async function updateReportStatus(id, adminId, input) {
+  const status = input.status;
+  const resolved = status === "resolved" || status === "dismissed";
+  const payload = {
+    status,
+    ...(input.resolution !== undefined ? { resolution: String(input.resolution || "").trim() } : {}),
+    resolvedBy: resolved ? String(adminId) : null,
+    resolvedAt: resolved ? now() : null,
+  };
+  const updated = await Report.findByIdAndUpdate(String(id), { $set: payload }, { new: true, runValidators: true }).lean();
+  return updated ? presentReport(updated) : null;
+}
+
+export async function listAdminUsers() {
+  const users = await User.find({ role: { $ne: "assistant" } }).select("+email").sort({ createdAt: -1 }).limit(100).lean();
+  return users.map((user) => publicUser(record(user)));
+}
+
+export async function setUserDisabled(id, disabled, actorId) {
+  const target = await findUserById(id);
+  if (!target) return null;
+  if (target.id === String(actorId)) throw new AppError("You cannot change your own account status.", 403);
+  if (target.role === "admin" || target.role === "assistant") throw new AppError("Administrator accounts cannot be locked here.", 403);
+  const updated = await User.findByIdAndUpdate(String(id), { $set: { disabled: Boolean(disabled), ...(disabled ? { isOnline: false } : {}) } }, { new: true, runValidators: true }).select("+email").lean();
+  return updated ? publicUser(record(updated)) : null;
+}
+
 export async function adminStats() {
   const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - 6);
-  const [users, online, messageCount, storage, chart, recentUsers] = await Promise.all([
+  const [users, online, messageCount, storage, chart, recentUsers, reports] = await Promise.all([
     User.countDocuments({ role: { $ne: "assistant" } }), User.countDocuments({ isOnline: true, role: { $ne: "assistant" } }), Message.countDocuments(),
     Upload.aggregate([{ $group: { _id: null, bytes: { $sum: "$size" } } }]),
     Message.aggregate([{ $match: { createdAt: { $gte: start } } }, { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, messages: { $sum: 1 } } }]),
     User.find({ role: { $ne: "assistant" } }).select("+email").sort({ createdAt: -1 }).limit(4).lean(),
+    Report.countDocuments({ status: { $in: [...openReportStatuses] } }),
   ]);
   const formatter = new Intl.DateTimeFormat("en", { weekday: "short" });
   const counts = new Map(chart.map((item) => [item._id, item.messages]));
   const days = Array.from({ length: 7 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); return { label: formatter.format(date), messages: counts.get(date.toISOString().slice(0, 10)) || 0 }; });
-  return { totals: { users, online, messages: messageCount, storageBytes: Number(storage[0]?.bytes || 0), reports: 0 }, chart: days, recentUsers: recentUsers.map((user) => publicUser(record(user))) };
+  return { totals: { users, online, messages: messageCount, storageBytes: Number(storage[0]?.bytes || 0), reports }, chart: days, recentUsers: recentUsers.map((user) => publicUser(record(user))) };
 }
 
 export async function setUserPresence(userId, isOnline) {

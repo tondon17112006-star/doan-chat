@@ -6,12 +6,12 @@ import {
   createRealtimeNotification,
   findUserById,
   getConversation,
+  getUserProfile,
   isBlockedBetween,
   setUserPresence,
   updateCall,
 } from "../services/dataService.js";
 import { emitToUsers, onlineUserIds } from "../services/realtimeService.js";
-import { publicUser } from "../utils/helpers.js";
 import { verifyAccessToken } from "../utils/tokens.js";
 
 const CALL_TIMEOUT_MS = webrtcConfig.callTimeoutMs;
@@ -24,7 +24,7 @@ export function registerSocketHandlers(io) {
     try {
       const payload = verifyAccessToken(socket.handshake.auth?.token || "");
       const user = await findUserById(payload.sub);
-      if (!user) return next(new Error("unauthorized"));
+      if (!user || user.disabled) return next(new Error("unauthorized"));
       socket.data.user = user;
       next();
     } catch {
@@ -39,7 +39,7 @@ export function registerSocketHandlers(io) {
     clearPendingOffline(userId);
     socket.join(userId);
     const online = await setUserPresence(user.id, true);
-    if (!wasOnline) socket.broadcast.emit("presence:update", { userId: user.id, isOnline: true, lastSeen: online?.lastSeen });
+    if (!wasOnline) socket.broadcast.emit("presence:update", { userId: user.id, isOnline: true });
     emitSocket(socket, "webrtc:config", { iceServers: getIceServers(), callTimeoutMs: CALL_TIMEOUT_MS });
 
     socket.on("webrtc:config:request", (acknowledge) => {
@@ -55,19 +55,22 @@ export function registerSocketHandlers(io) {
       if (await getConversation(conversationId, user.id)) socket.leave(`conversation:${conversationId}`);
     });
     socket.on("typing:start", async ({ conversationId, activity = "typing" } = {}) => {
+      if (!user.verified) return;
       if (!(await getConversation(conversationId, user.id))) return;
       socket.to(`conversation:${conversationId}`).emit("typing:start", {
         conversationId,
         activity,
-        user: { id: user.id, username: user.username, avatar: user.avatar },
+        user: { id: user.id, username: user.username },
       });
     });
     socket.on("typing:stop", async ({ conversationId } = {}) => {
+      if (!user.verified) return;
       if (!(await getConversation(conversationId, user.id))) return;
       socket.to(`conversation:${conversationId}`).emit("typing:stop", { conversationId, userId: user.id });
     });
 
     socket.on("call:start", async (call = {}, acknowledge) => {
+      if (!user.verified) return acknowledge?.({ ok: false, error: "Please verify your email before placing a call." });
       const conversation = await getConversation(call.conversationId, user.id);
       if (!conversation) return acknowledge?.({ ok: false, error: "Conversation not found." });
       const candidates = new Set(conversation.participants.map(String).filter((id) => id !== userId));
@@ -102,7 +105,7 @@ export function registerSocketHandlers(io) {
         ]);
         session.records.push({ targetId, outgoingId: outgoing?.id, incomingId: incoming?.id, online: online.has(targetId) });
         if (online.has(targetId)) {
-          emitToUsers(io, [targetId], "call:incoming", { ...call, callId, conversationId: session.conversationId, type: session.type, caller: publicUser(user), incoming: true, status: "ringing" });
+          emitToUsers(io, [targetId], "call:incoming", { ...call, callId, conversationId: session.conversationId, type: session.type, caller: await getUserProfile(user.id, targetId), incoming: true, status: "ringing" });
         } else {
           await createRealtimeNotification(targetId, userId, {
             type: "call",
@@ -125,6 +128,7 @@ export function registerSocketHandlers(io) {
     });
 
     socket.on("call:accept", async ({ callId, callerId, conversationId } = {}) => {
+      if (!user.verified) return;
       const session = await readActiveCall(callId);
       const conversation = await getConversation(conversationId || session?.conversationId, user.id);
       if (!session || String(session.callerId) !== String(callerId) || !session.recipients.includes(userId) || !(await canSignalCall(conversation, user.id, callerId))) return;
@@ -141,6 +145,7 @@ export function registerSocketHandlers(io) {
     });
 
     socket.on("call:reject", async ({ callId, callerId, conversationId } = {}) => {
+      if (!user.verified) return;
       const session = await readActiveCall(callId);
       const conversation = await getConversation(conversationId || session?.conversationId, user.id);
       if (!session || String(session.callerId) !== String(callerId) || !session.recipients.includes(userId) || !(await canSignalCall(conversation, user.id, callerId))) return;
@@ -149,6 +154,7 @@ export function registerSocketHandlers(io) {
     });
 
     socket.on("call:end", async ({ callId, conversationId } = {}) => {
+      if (!user.verified) return;
       const session = await readActiveCall(callId);
       const conversation = await getConversation(conversationId || session?.conversationId, user.id);
       if (!session || !conversation || !callParticipant(session, userId)) return;
@@ -158,6 +164,7 @@ export function registerSocketHandlers(io) {
 
     for (const event of ["webrtc:offer", "webrtc:answer", "webrtc:ice"]) {
       socket.on(event, async ({ targetId, conversationId, callId, ...payload } = {}) => {
+        if (!user.verified) return;
         const conversation = await getConversation(conversationId, user.id);
         if (!(await canSignalCall(conversation, user.id, targetId))) return;
         const session = callId ? await readActiveCall(callId) : null;
@@ -228,8 +235,8 @@ function scheduleOffline(io, user, socket) {
   pendingOffline.set(userId, setTimeout(async () => {
     const online = await onlineUserIds(io, [userId]);
     if (online.length) return;
-    const offline = await setUserPresence(userId, false);
-    socket.broadcast.emit("presence:update", { userId, isOnline: false, lastSeen: offline?.lastSeen });
+    await setUserPresence(userId, false);
+    socket.broadcast.emit("presence:update", { userId, isOnline: false });
     pendingOffline.delete(userId);
   }, 750));
 }

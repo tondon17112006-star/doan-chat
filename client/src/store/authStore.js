@@ -7,11 +7,13 @@ export const useAuthStore = create(
     (set) => ({
       user: null,
       accessToken: null,
+      verificationDebugOtp: "",
       hydrated: false,
       setHydrated: (hydrated) => set({ hydrated }),
-      setSession: ({ user, accessToken }) => set({ user, accessToken }),
+      setSession: ({ user, accessToken, verification }) => set({ user, accessToken, verificationDebugOtp: verification?.debugOtp || "" }),
+      setVerificationDebugOtp: (verificationDebugOtp) => set({ verificationDebugOtp }),
       patchUser: (updates) => set((state) => ({ user: state.user ? { ...state.user, ...updates } : null })),
-      clearSession: () => set({ user: null, accessToken: null })
+      clearSession: () => set({ user: null, accessToken: null, verificationDebugOtp: "" })
     }),
     {
       name: "lumina-session",
