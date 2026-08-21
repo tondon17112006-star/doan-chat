@@ -142,8 +142,22 @@ apiRouter.post(
 apiRouter.get("/uploads/:filename", param("filename").matches(/^[a-f0-9-]+\.[a-z0-9]+$/i), validate, miscController.downloadUpload);
 apiRouter.post("/friends/:id", requireVerified, body("action").isIn(["request", "accept", "decline", "cancel", "remove", "block", "unblock"]), validate, socialController.friend);
 apiRouter.get("/stories", socialController.stories);
-apiRouter.post("/stories", requireVerified, body("mediaUrl").isString().notEmpty(), body("type").optional().isIn(["image", "video"]), validate, socialController.addStory);
+apiRouter.post(
+  "/stories",
+  requireVerified,
+  body("mediaUrl").isString().notEmpty(),
+  body("type").optional().isIn(["image", "video"]),
+  body("caption").optional().isString().isLength({ max: 500 }),
+  body("audience").optional().isIn(["everyone", "friends", "custom"]),
+  body("audienceUserIds").optional().isArray({ max: 100 }),
+  body("audienceUserIds.*").optional().isString().trim().isLength({ min: 1, max: 200 }),
+  validate,
+  socialController.addStory,
+);
 apiRouter.post("/stories/:id/view", requireVerified, socialController.seeStory);
+apiRouter.post("/stories/:id/reply", requireVerified, body("content").isString().trim().isLength({ min: 1, max: 4_000 }), validate, socialController.replyStory);
+apiRouter.get("/stories/:id/viewers", requireVerified, param("id").isString().trim().isLength({ min: 1, max: 200 }), validate, socialController.storyViewers);
+apiRouter.delete("/stories/:id", requireVerified, param("id").isString().trim().isLength({ min: 1, max: 200 }), validate, socialController.removeStory);
 apiRouter.get("/notifications", socialController.notifications);
 apiRouter.post("/notifications/read", socialController.readNotifications);
 apiRouter.get("/calls", socialController.calls);

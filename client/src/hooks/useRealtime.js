@@ -1,14 +1,22 @@
 // File: client/src/hooks/useRealtime.js
-import { useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { connectSocket, disconnectSocket } from "../services/socket.js";
+import { socialApi } from "../services/api.js";
 import { useAuthStore } from "../store/authStore.js";
 import { useUiStore } from "../store/uiStore.js";
+import { showBrowserNotification } from "../utils/browserNotifications.js";
 
 export function useRealtime() {
   const token = useAuthStore((state) => state.accessToken);
   const queryClient = useQueryClient();
   const setActiveCall = useUiStore((state) => state.setActiveCall);
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: socialApi.settings, enabled: Boolean(token), staleTime: 60_000 });
+  const notificationPreferences = useRef(null);
+
+  useEffect(() => {
+    notificationPreferences.current = settings?.notifications || null;
+  }, [settings]);
 
   useEffect(() => {
     if (!token) return undefined;
@@ -21,8 +29,14 @@ export function useRealtime() {
         return { ...previous, messages: [...existing, message].sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt)) };
       });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      if (message.senderId !== useAuthStore.getState().user?.id && document.hidden && Notification.permission === "granted") {
-        new Notification(message.sender?.username || "New message", { body: message.content || "Sent an attachment" });
+      if (message.senderId !== useAuthStore.getState().user?.id) {
+        showBrowserNotification({
+          preferences: notificationPreferences.current,
+          category: "messages",
+          title: message.sender?.username || "New message",
+          body: message.content || "Sent an attachment",
+          tag: `message:${message.id}`,
+        });
       }
     };
     const seenTimeline = ({ conversationId, readAt }) => {
@@ -52,13 +66,39 @@ export function useRealtime() {
     socket.on("presence:update", presence);
     socket.on("group:update", () => queryClient.invalidateQueries({ queryKey: ["conversations"] }));
     socket.on("story:new", () => queryClient.invalidateQueries({ queryKey: ["stories"] }));
-    socket.on("notification:new", () => queryClient.invalidateQueries({ queryKey: ["notifications"] }));
-    socket.on("friend:update", () => {
+    const removeStory = ({ id } = {}) => {
+      if (id && useUiStore.getState().story?.id === id) useUiStore.getState().setStory(null);
+      queryClient.invalidateQueries({ queryKey: ["stories"] });
+    };
+    socket.on("story:delete", removeStory);
+    const refreshNotifications = () => queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    socket.on("notification:new", refreshNotifications);
+    const friendUpdate = ({ action, userId } = {}) => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
       queryClient.invalidateQueries({ queryKey: ["friends"] });
       queryClient.invalidateQueries({ queryKey: ["friend-requests"] });
-    });
-    socket.on("call:incoming", (call) => setActiveCall({ ...call, incoming: true, status: "ringing" }));
+      if (userId !== useAuthStore.getState().user?.id && ["request", "accept"].includes(action)) {
+        showBrowserNotification({
+          preferences: notificationPreferences.current,
+          category: "friendRequests",
+          title: action === "request" ? "New friend request" : "Friend request accepted",
+          body: "Open Lumina to view it.",
+          tag: `friend:${action}:${userId}`,
+        });
+      }
+    };
+    socket.on("friend:update", friendUpdate);
+    const incomingCall = (call) => {
+      setActiveCall({ ...call, incoming: true, status: "ringing" });
+      showBrowserNotification({
+        preferences: notificationPreferences.current,
+        category: "calls",
+        title: `${call.type === "video" ? "Video" : "Voice"} call`,
+        body: `${call.caller?.username || "Someone"} is calling you`,
+        tag: `call:${call.callId || call.conversationId}`,
+      });
+    };
+    socket.on("call:incoming", incomingCall);
     const refreshCalls = () => queryClient.invalidateQueries({ queryKey: ["calls"] });
     const endCall = ({ callId } = {}) => {
       const active = useUiStore.getState().activeCall;
@@ -83,7 +123,10 @@ export function useRealtime() {
       socket.off("reaction:update", editTimeline);
       socket.off("message:seen", seenTimeline);
       socket.off("presence:update", presence);
-      socket.off("friend:update");
+      socket.off("notification:new", refreshNotifications);
+      socket.off("friend:update", friendUpdate);
+      socket.off("story:delete", removeStory);
+      socket.off("call:incoming", incomingCall);
       socket.off("call:ended", endCall);
       socket.off("call:timeout", endCall);
       socket.off("call:unavailable", endCall);

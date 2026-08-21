@@ -1,6 +1,6 @@
 // File: server/controllers/miscController.js
 import path from "node:path";
-import { access, constants, unlink } from "node:fs/promises";
+import { unlink } from "node:fs/promises";
 import sharp from "sharp";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import {
@@ -16,12 +16,14 @@ import {
 } from "../services/dataService.js";
 import { audit } from "../services/auditService.js";
 import { readinessStatus } from "../services/healthService.js";
-import { safeOriginalName, uploadDirectory, validateUploadedFile } from "../middlewares/upload.js";
+import { safeOriginalName, validateUploadedFile } from "../middlewares/upload.js";
+import { getStorageProvider, storageProviderName, uploadUrlFor } from "../services/storageProvider.js";
 import { AppError } from "../utils/AppError.js";
 
 export const uploadFiles = asyncHandler(async (request, response) => {
   const uploadedPaths = new Set((request.files || []).map((file) => file.path));
   try {
+    await getStorageProvider().prepare();
     await assertUploadQuota(request.user.id, (request.files || []).reduce((total, file) => total + file.size, 0));
     const files = [];
     for (const file of request.files || []) {
@@ -39,7 +41,14 @@ export const uploadFiles = asyncHandler(async (request, response) => {
         size = result.size;
         mimeType = "image/webp";
       }
-      files.push({ filename, originalName: safeOriginalName(file.originalname), mimeType, size });
+      files.push({
+        filename,
+        storageKey: filename,
+        storageProvider: storageProviderName(),
+        originalName: safeOriginalName(file.originalname),
+        mimeType,
+        size,
+      });
     }
     const purpose = ["attachment", "avatar", "story"].includes(request.query.purpose) ? request.query.purpose : "attachment";
     const records = await registerUploads(request.user.id, files, purpose);
@@ -51,7 +60,7 @@ export const uploadFiles = asyncHandler(async (request, response) => {
         name: file.originalName,
         type: file.mimeType,
         size: file.size,
-        url: `/api/uploads/${file.filename}`,
+        url: uploadUrlFor(file.storageKey || file.filename),
       })),
     });
   } catch (error) {
@@ -76,20 +85,16 @@ export const servePublicDemoUpload = asyncHandler(async (request, response) => {
 });
 
 async function sendStoredUpload(file, response, cacheControl) {
-  const filePath = path.resolve(uploadDirectory, file.filename);
-  if (path.dirname(filePath) !== uploadDirectory) throw new AppError("File not found.", 404);
-  try {
-    await access(filePath, constants.R_OK);
-  } catch {
-    throw new AppError("File not found.", 404);
-  }
+  const provider = getStorageProvider(file.storageProvider || "local");
+  const storageKey = file.storageKey || file.filename;
+  if (!(await provider.exists(storageKey))) throw new AppError("File not found.", 404);
   response.set({
     "Cache-Control": cacheControl,
     "X-Content-Type-Options": "nosniff",
     "Content-Disposition": `inline; filename="${String(file.originalName || file.filename).replace(/["\\]/g, "_")}"`,
   });
   response.type(file.mimeType);
-  response.sendFile(filePath);
+  provider.send(storageKey, response);
 }
 
 export const search = asyncHandler(async (request, response) => {

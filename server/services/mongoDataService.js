@@ -16,8 +16,10 @@ import {
 } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
 import { publicUser, unique } from "../utils/helpers.js";
+import { getStorageProvider, storageProviderName } from "./storageProvider.js";
 
 export const USER_UPLOAD_QUOTA_BYTES = 250 * 1024 * 1024;
+export const ORPHAN_UPLOAD_GRACE_MS = 24 * 60 * 60 * 1000;
 
 const makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 const now = () => new Date();
@@ -25,7 +27,7 @@ const defaultSettings = () => ({
   theme: "system",
   chatWallpaper: "aurora",
   language: "en",
-  notifications: { messages: true, calls: true, friendRequests: true, sound: true, desktop: false },
+  notifications: { messages: true, calls: true, friendRequests: true, sound: true, desktop: false, privateMode: false },
   privacy: { readReceipts: true, lastSeen: "everyone", profilePhoto: "everyone" },
 });
 const directKey = (ids) => unique(ids).sort().join(":");
@@ -55,6 +57,10 @@ function directPeerId(conversation, userId) {
 function localUploadFilename(url) {
   const match = /^\/api\/uploads\/([a-f0-9-]+\.[a-z0-9]+)$/i.exec(String(url || ""));
   return match?.[1] || null;
+}
+
+function uploadUrlForRecord(record) {
+  return `/api/uploads/${record.filename}`;
 }
 
 function unsupportedTransaction(error) {
@@ -191,7 +197,7 @@ async function claimMessageAttachments(userId, conversationId, attachments, sess
       claimed.push(structuredClone(attachment));
       continue;
     }
-    const upload = record(await Upload.findOne({ filename }).session(session || null).lean());
+    const upload = record(await Upload.findOne({ filename, status: { $ne: "deleted" } }).session(session || null).lean());
     if (!upload) throw new AppError("This uploaded file was not found.", 404);
     if (upload.purpose !== "attachment") throw new AppError("This file cannot be attached to a chat message.", 400);
     if (!(await canAttachUpload(userId, upload))) throw new AppError("You do not have permission to attach this file.", 403);
@@ -203,7 +209,7 @@ async function claimMessageAttachments(userId, conversationId, attachments, sess
       name: upload.originalName,
       type: upload.mimeType,
       size: upload.size,
-      url: `/api/uploads/${upload.filename}`,
+      url: uploadUrlForRecord(upload),
       ...(attachment.duration ? { duration: Math.max(0, Number(attachment.duration) || 0) } : {}),
     });
   }
@@ -307,26 +313,44 @@ export async function isBlockedBetween(firstUserId, secondUserId) {
 }
 
 export async function assertUploadQuota(userId, incomingBytes) {
-  const [usage] = await Upload.aggregate([{ $match: { ownerId: String(userId) } }, { $group: { _id: null, total: { $sum: "$size" } } }]);
+  const [usage] = await Upload.aggregate([{ $match: { ownerId: String(userId), status: { $ne: "deleted" } } }, { $group: { _id: null, total: { $sum: "$size" } } }]);
   if (Number(usage?.total || 0) + Math.max(0, Number(incomingBytes) || 0) > USER_UPLOAD_QUOTA_BYTES) {
     throw new AppError("Your upload storage quota is full. Delete older files or try a smaller upload.", 413);
   }
 }
 
 export async function registerUploads(userId, files, purpose = "attachment") {
-  const records = files.map((file) => ({ id: String(file.filename), filename: String(file.filename), ownerId: String(userId), originalName: String(file.originalName), mimeType: String(file.mimeType), size: Math.max(0, Number(file.size) || 0), purpose, conversationIds: [], publicDemo: false }));
+  const records = files.map((file) => ({
+    id: String(file.filename),
+    filename: String(file.filename),
+    storageProvider: file.storageProvider || storageProviderName(),
+    storageKey: String(file.storageKey || file.filename),
+    ownerId: String(userId),
+    originalName: String(file.originalName),
+    mimeType: String(file.mimeType),
+    size: Math.max(0, Number(file.size) || 0),
+    purpose,
+    conversationIds: [],
+    publicDemo: false,
+    status: "active",
+    deletedAt: null,
+  }));
   if (records.length) await Upload.insertMany(records.map(documentForCreate), { ordered: true });
   return records;
 }
 
 export async function findUploadByFilename(filename) {
-  return record(await Upload.findOne({ filename: String(filename) }).lean());
+  return record(await Upload.findOne({ filename: String(filename), status: { $ne: "deleted" } }).lean());
 }
 
 export async function canUserReadUpload(userId, filename) {
-  const upload = record(await Upload.findOne({ filename: String(filename) }).lean());
+  const upload = record(await Upload.findOne({ filename: String(filename), status: { $ne: "deleted" } }).lean());
   if (!upload) return false;
-  if (upload.publicDemo || upload.purpose === "story" || upload.ownerId === String(userId)) return true;
+  if (upload.publicDemo || upload.ownerId === String(userId)) return true;
+  if (upload.purpose === "story") {
+    const story = record(await Story.findOne({ mediaUrl: uploadUrlForRecord(upload) }).lean());
+    return Boolean(story && await canAccessStory(story, userId));
+  }
   if (upload.purpose === "avatar") {
     const privacy = (await settingsForUser(upload.ownerId)).privacy || defaultSettings().privacy;
     return canViewPrivacySetting(userId, upload.ownerId, privacy.profilePhoto);
@@ -335,15 +359,43 @@ export async function canUserReadUpload(userId, filename) {
 }
 
 export async function findPublicDemoUpload(filename) {
-  return record(await Upload.findOne({ filename: String(filename), publicDemo: true }).lean());
+  return record(await Upload.findOne({ filename: String(filename), publicDemo: true, status: { $ne: "deleted" } }).lean());
 }
 
 export async function assertOwnedUploadPurpose(userId, url, purpose) {
   const filename = localUploadFilename(url);
   if (!filename) return;
-  const upload = record(await Upload.findOne({ filename }).lean());
+  const upload = record(await Upload.findOne({ filename, status: { $ne: "deleted" } }).lean());
   if (!upload) throw new AppError("This uploaded file was not found.", 404);
   if (upload.ownerId !== String(userId) || upload.purpose !== purpose) throw new AppError("You do not have permission to use this uploaded file here.", 403);
+}
+
+async function uploadIsReferenced(upload) {
+  const url = uploadUrlForRecord(upload);
+  if (upload.publicDemo) return true;
+  if (upload.purpose === "attachment") {
+    return Boolean((upload.conversationIds || []).length || await Message.exists({ "attachments.url": url }));
+  }
+  if (upload.purpose === "avatar") {
+    return Boolean(await User.exists({ $or: [{ avatar: url }, { coverPhoto: url }] }) || await Conversation.exists({ avatar: url }));
+  }
+  if (upload.purpose === "story") return Boolean(await Story.exists({ mediaUrl: url }));
+  return false;
+}
+
+export async function cleanupOrphanUploads(options = {}) {
+  const graceMs = Number.isFinite(Number(options.graceMs)) ? Number(options.graceMs) : ORPHAN_UPLOAD_GRACE_MS;
+  const limit = Math.max(1, Math.min(500, Number(options.limit) || 100));
+  const cutoff = new Date(Date.now() - Math.max(0, graceMs));
+  const candidates = (await Upload.find({ status: { $ne: "deleted" }, publicDemo: { $ne: true }, createdAt: { $lte: cutoff } }).sort({ createdAt: 1 }).limit(limit).lean()).map(record);
+  const removed = [];
+  for (const upload of candidates) {
+    if (await uploadIsReferenced(upload)) continue;
+    await getStorageProvider(upload.storageProvider || "local").remove(upload.storageKey || upload.filename);
+    const updated = record(await Upload.findByIdAndUpdate(upload.id, { $set: { status: "deleted", deletedAt: now() } }, { new: true }).lean());
+    removed.push(updated);
+  }
+  return { scanned: candidates.length, removed: removed.length, uploads: removed };
 }
 
 export async function isDirectConversationBlocked(conversationId, userId) {
@@ -528,25 +580,84 @@ export async function markConversationRead(conversationId, userId) {
 }
 
 export async function getStories(userId) {
-  const blocks = await Block.find({ $or: [{ userId: String(userId) }, { blockedUserId: String(userId) }] }).lean();
-  const excluded = blocks.map((block) => block.userId === String(userId) ? block.blockedUserId : block.userId);
-  const stories = (await Story.find({ expiresAt: { $gt: now() }, userId: { $nin: excluded } }).sort({ createdAt: -1 }).lean()).map(record);
-  const users = await findUsers(unique(stories.map((story) => story.userId)));
-  return Promise.all(stories.map(async (story) => ({ ...story, user: await presentUserForViewer(users.get(story.userId), userId) })));
+  const stories = (await Story.find({ expiresAt: { $gt: now() } }).sort({ createdAt: -1 }).lean()).map(record);
+  const visible = await Promise.all(stories.map(async (story) => ((await canAccessStory(story, userId)) ? presentStory(story, userId) : null)));
+  return visible.filter(Boolean);
 }
 
 export async function createStory(userId, input) {
-  const value = { id: makeId("s"), userId: String(userId), type: input.type === "video" ? "video" : "image", mediaUrl: input.mediaUrl, caption: input.caption || "", viewers: [], reactions: [], expiresAt: new Date(Date.now() + 86_400_000) };
+  const audience = normalizeStoryAudience(input.audience);
+  const audienceUserIds = await validateStoryAudienceUsers(userId, audience, input.audienceUserIds);
+  const value = { id: makeId("s"), userId: String(userId), type: input.type === "video" ? "video" : "image", mediaUrl: input.mediaUrl, caption: input.caption || "", audience, audienceUserIds, viewers: [], reactions: [], expiresAt: new Date(Date.now() + 86_400_000) };
   await Story.create(documentForCreate(value));
-  return { ...value, user: await getUserProfile(userId, userId) };
+  return presentStory(value, userId);
 }
 
 export async function viewStory(id, userId, reaction) {
   const story = record(await Story.findById(String(id)).lean());
-  if (!story || await isBlockedBetween(userId, story.userId)) return null;
+  if (!story || !(await canAccessStory(story, userId))) return null;
+  if (String(story.userId) === String(userId)) return presentStory(story, userId);
   const update = { $addToSet: { viewers: String(userId) } };
   if (reaction) update.$push = { reactions: { userId: String(userId), emoji: reaction, createdAt: now() } };
-  return record(await Story.findByIdAndUpdate(String(id), update, { new: true, runValidators: true }).lean());
+  return presentStory(record(await Story.findByIdAndUpdate(String(id), update, { new: true, runValidators: true }).lean()), userId);
+}
+
+export async function deleteStory(id, userId) {
+  const story = record(await Story.findById(String(id)).lean());
+  if (!story) return null;
+  if (story.userId !== String(userId)) throw new AppError("Only the story owner can delete it.", 403);
+  await Story.deleteOne({ _id: String(id), userId: String(userId) });
+  return { id: story.id, deleted: true };
+}
+
+export async function getStoryViewers(id, userId) {
+  const story = record(await Story.findById(String(id)).lean());
+  if (!story) return null;
+  if (story.userId !== String(userId)) throw new AppError("Only the story owner can view its viewers.", 403);
+  const users = await findUsers(unique(story.viewers || []));
+  const viewers = await Promise.all((story.viewers || []).map((viewerId) => presentUserForViewer(users.get(String(viewerId)), userId)));
+  return viewers.filter(Boolean);
+}
+
+export async function replyToStory(id, userId, content) {
+  const story = record(await Story.findById(String(id)).lean());
+  if (!story || String(story.userId) === String(userId) || !(await canAccessStory(story, userId))) return null;
+  const conversation = await createConversation(userId, { type: "direct", participants: [story.userId] });
+  if (!conversation) return null;
+  const message = await createMessage(userId, conversation.id, { type: "text", content });
+  return message ? { conversation, message, recipientId: String(story.userId) } : null;
+}
+
+function normalizeStoryAudience(value) {
+  return ["everyone", "friends", "custom"].includes(value) ? value : "everyone";
+}
+
+async function validateStoryAudienceUsers(ownerId, audience, input) {
+  if (audience !== "custom") return [];
+  const ids = unique(Array.isArray(input) ? input.filter(Boolean) : []).filter((id) => String(id) !== String(ownerId));
+  if (!ids.length) throw new AppError("Choose at least one person for a custom story audience.", 422);
+  if (ids.length > 100 || (await User.countDocuments({ _id: { $in: ids } })) !== ids.length) {
+    throw new AppError("One or more custom audience members do not exist.", 422);
+  }
+  return ids;
+}
+
+async function canAccessStory(story, viewerId) {
+  if (String(story.userId) === String(viewerId)) return true;
+  if (await isBlockedBetween(viewerId, story.userId)) return false;
+  if ((story.audience || "everyone") === "everyone") return true;
+  if (story.audience === "friends") return Boolean(await Friendship.exists({ pairKey: pairKey(viewerId, story.userId), status: "accepted" }));
+  return (story.audienceUserIds || []).map(String).includes(String(viewerId));
+}
+
+async function presentStory(story, viewerId) {
+  const value = record(story);
+  if (!value) return null;
+  value.user = await getUserProfile(value.userId, viewerId);
+  value.viewerCount = (value.viewers || []).length;
+  delete value.viewers;
+  if (String(value.userId) !== String(viewerId)) delete value.audienceUserIds;
+  return value;
 }
 
 export async function getNotifications(userId) {

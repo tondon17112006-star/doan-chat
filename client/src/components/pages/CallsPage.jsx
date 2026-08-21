@@ -19,6 +19,7 @@ export default function CallsPage() {
     mutationFn: async (call) => {
       if (!call.conversationId || !call.peer?.id) throw new Error("This call no longer has an available conversation.");
       const conversation = await chatApi.conversation(call.conversationId);
+      if (conversation.type !== "direct") throw new Error("Group calls are not available yet.");
       const payload = {
         callId: crypto.randomUUID(),
         conversationId: conversation.id,

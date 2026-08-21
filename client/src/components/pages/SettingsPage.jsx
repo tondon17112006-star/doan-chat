@@ -18,6 +18,7 @@ import Avatar from "../common/Avatar.jsx";
 import { authApi, chatApi, socialApi } from "../../services/api.js";
 import { useAuthStore } from "../../store/authStore.js";
 import { useUiStore } from "../../store/uiStore.js";
+import { browserNotificationPermission, browserNotificationSupport, requestBrowserNotificationPermission } from "../../utils/browserNotifications.js";
 
 const nav = [
   { id: "profile", label: "Profile", icon: <HiUserCircle /> },
@@ -27,6 +28,8 @@ const nav = [
   { id: "security", label: "Password & devices", icon: <HiKey /> },
   { id: "language", label: "Language", icon: <HiLanguage /> }
 ];
+
+const notificationDefaults = { messages: true, calls: true, friendRequests: true, sound: true, desktop: false, privateMode: false };
 
 export default function SettingsPage() {
   const [section, setSection] = useState("profile");
@@ -40,6 +43,7 @@ export default function SettingsPage() {
   const [prefs, setPrefs] = useState(null);
   const [profileError, setProfileError] = useState("");
   const [settingsError, setSettingsError] = useState("");
+  const [browserPermission, setBrowserPermission] = useState(() => browserNotificationPermission());
   const avatarInputRef = useRef(null);
   const profileMutation = useMutation({
     mutationFn: socialApi.updateProfile,
@@ -73,7 +77,10 @@ export default function SettingsPage() {
     onError: (requestError) => setSettingsError(requestError.response?.data?.message || "Could not save your settings."),
   });
 
-  useEffect(() => setPrefs(settings), [settings]);
+  useEffect(() => {
+    if (!settings) return;
+    setPrefs({ ...settings, notifications: { ...notificationDefaults, ...settings.notifications } });
+  }, [settings]);
   function flashSaved() {
     setSaved(true);
     setTimeout(() => setSaved(false), 1_600);
@@ -81,6 +88,21 @@ export default function SettingsPage() {
   function updatePref(path, value) {
     const [group, key] = path.split(".");
     setPrefs((current) => ({ ...current, [group]: { ...current[group], [key]: value } }));
+  }
+  async function changeDesktopNotifications(enabled) {
+    setSettingsError("");
+    if (!enabled) return updatePref("notifications.desktop", false);
+    const permission = await requestBrowserNotificationPermission();
+    setBrowserPermission(permission);
+    if (permission !== "granted") {
+      updatePref("notifications.desktop", false);
+      return setSettingsError(
+        permission === "unsupported"
+          ? "This browser does not support desktop notifications."
+          : "Browser notification permission was not granted. You can change it in your browser settings.",
+      );
+    }
+    updatePref("notifications.desktop", true);
   }
   function chooseAvatar(event) {
     const file = event.target.files?.[0];
@@ -135,8 +157,10 @@ export default function SettingsPage() {
               <ToggleRow title="New messages" description="Show a notification when someone messages you." checked={prefs.notifications.messages} onChange={(value) => updatePref("notifications.messages", value)} />
               <ToggleRow title="Incoming calls" description="Ring for voice and video calls." checked={prefs.notifications.calls} onChange={(value) => updatePref("notifications.calls", value)} />
               <ToggleRow title="Friend requests" description="Let you know about new requests." checked={prefs.notifications.friendRequests} onChange={(value) => updatePref("notifications.friendRequests", value)} />
-              <ToggleRow title="Sound" description="Play a gentle sound for new activity." checked={prefs.notifications.sound} onChange={(value) => updatePref("notifications.sound", value)} />
-              <ToggleRow title="Desktop notifications" description="Show notifications outside the browser tab." checked={prefs.notifications.desktop} onChange={(value) => updatePref("notifications.desktop", value)} />
+              <ToggleRow title="Sound" description="Allow the browser sound for an eligible desktop notification." checked={prefs.notifications.sound} onChange={(value) => updatePref("notifications.sound", value)} />
+              <ToggleRow title="Desktop notifications" description="Ask this browser for permission, then alert only while Lumina is not focused." checked={prefs.notifications.desktop} onChange={changeDesktopNotifications} />
+              <ToggleRow title="Private notification previews" description="Hide names and message text in browser notifications on this device." checked={prefs.notifications.privateMode} onChange={(value) => updatePref("notifications.privateMode", value)} />
+              <p className="settings-note">Browser permission: {browserPermission === "granted" ? "allowed" : browserPermission === "default" ? "not requested" : browserPermission === "unsupported" ? "not supported" : "blocked"}. {browserNotificationSupport() ? "Web Push is prepared but needs server configuration before it can deliver notifications while the app is closed." : "Use a browser that supports notifications to receive desktop alerts."}</p>
               <SaveBar saved={saved} pending={settingsMutation.isPending} onSave={() => settingsMutation.mutate({ notifications: prefs.notifications })} />
             </>
           )}

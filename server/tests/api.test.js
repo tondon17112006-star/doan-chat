@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
-import { unlink } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import request from "supertest";
 import { app } from "../app.js";
-import { resetMemoryData } from "../services/dataService.js";
+import { cleanupOrphanUploads, registerUploads, resetMemoryData, USER_UPLOAD_QUOTA_BYTES } from "../services/dataService.js";
 import { resetAuthMemory } from "../services/authService.js";
 
 const validPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl1R9sAAAAASUVORK5CYII=", "base64");
@@ -196,6 +196,52 @@ describe("Lumina API", () => {
       .set("Authorization", alexAuthorization)
       .send({ type: "image", attachments: [attachment] })
       .expect(403);
+  });
+
+  it("enforces per-user upload quota from active upload records", async () => {
+    const authorization = await login("alex@lumina.chat");
+    await registerUploads("u-alex", [{
+      filename: `${crypto.randomUUID()}.png`,
+      storageKey: `${crypto.randomUUID()}.png`,
+      storageProvider: "local",
+      originalName: "almost-full.png",
+      mimeType: "image/png",
+      size: USER_UPLOAD_QUOTA_BYTES - 10,
+    }]);
+
+    await request(app)
+      .post("/api/uploads")
+      .set("Authorization", authorization)
+      .attach("files", validPng, { filename: "over-quota.png", contentType: "image/png" })
+      .expect(413);
+  });
+
+  it("cleans orphaned local uploads without deleting referenced files", async () => {
+    const authorization = await login("alex@lumina.chat");
+    const orphanFilename = `${crypto.randomUUID()}.png`;
+    const keptFilename = `${crypto.randomUUID()}.png`;
+    await Promise.all([
+      writeFile(path.join(process.cwd(), "uploads", orphanFilename), validPng),
+      writeFile(path.join(process.cwd(), "uploads", keptFilename), validPng),
+    ]);
+    uploadedTestFiles.add(orphanFilename);
+    uploadedTestFiles.add(keptFilename);
+    await registerUploads("u-alex", [
+      { filename: orphanFilename, storageKey: orphanFilename, storageProvider: "local", originalName: "orphan.png", mimeType: "image/png", size: validPng.length },
+      { filename: keptFilename, storageKey: keptFilename, storageProvider: "local", originalName: "kept.png", mimeType: "image/png", size: validPng.length },
+    ]);
+
+    await request(app)
+      .post("/api/messages/c-maya")
+      .set("Authorization", authorization)
+      .send({ type: "image", attachments: [{ url: `/api/uploads/${keptFilename}`, name: "kept.png", type: "image/png", size: validPng.length }] })
+      .expect(201);
+
+    const result = await cleanupOrphanUploads({ graceMs: 0 });
+    expect(result.removed).toBe(1);
+    expect(result.uploads[0].filename).toBe(orphanFilename);
+    await request(app).get(`/api/uploads/${orphanFilename}`).set("Authorization", authorization).expect(404);
+    await request(app).get(`/api/uploads/${keptFilename}`).set("Authorization", authorization).expect(200);
   });
 
   it("rejects protected routes without a token", async () => {
@@ -651,6 +697,65 @@ describe("Lumina API", () => {
       .expect(200);
     const friendsAfterUnblock = await request(app).get("/api/friends").set("Authorization", mayaAuthorization).expect(200);
     expect(friendsAfterUnblock.body.data).toHaveLength(0);
+  });
+
+  it("enforces story audiences, blocks private media access, and lets only the owner manage viewers or deletion", async () => {
+    const alexAuthorization = await login("alex@lumina.chat");
+    const mayaAuthorization = await login("maya@lumina.chat");
+    const jordanAuthorization = await login("jordan@lumina.chat");
+
+    await request(app).post("/api/friends/u-maya").set("Authorization", alexAuthorization).send({ action: "request" }).expect(200);
+    await request(app).post("/api/friends/u-alex").set("Authorization", mayaAuthorization).send({ action: "accept" }).expect(200);
+    const friendsStory = await request(app)
+      .post("/api/stories")
+      .set("Authorization", mayaAuthorization)
+      .send({ type: "image", mediaUrl: "https://example.test/friends-story.jpg", caption: "For friends", audience: "friends" })
+      .expect(201);
+    const alexStories = await request(app).get("/api/stories").set("Authorization", alexAuthorization).expect(200);
+    const jordanStories = await request(app).get("/api/stories").set("Authorization", jordanAuthorization).expect(200);
+    expect(alexStories.body.data.some((story) => story.id === friendsStory.body.data.id)).toBe(true);
+    expect(jordanStories.body.data.some((story) => story.id === friendsStory.body.data.id)).toBe(false);
+
+    const [uploaded] = (await request(app)
+      .post("/api/uploads?purpose=story")
+      .set("Authorization", mayaAuthorization)
+      .attach("files", validPng, { filename: "custom-story.png", contentType: "image/png" })
+      .expect(201)).body.data;
+    uploadedTestFiles.add(uploaded.url.split("/").at(-1));
+    const customStory = await request(app)
+      .post("/api/stories")
+      .set("Authorization", mayaAuthorization)
+      .send({ type: "image", mediaUrl: uploaded.url, caption: "Only Alex", audience: "custom", audienceUserIds: ["u-alex"] })
+      .expect(201);
+    expect(customStory.body.data).toMatchObject({ audience: "custom", audienceUserIds: ["u-alex"] });
+
+    const customForAlex = await request(app).get("/api/stories").set("Authorization", alexAuthorization).expect(200);
+    const customStoryForAlex = customForAlex.body.data.find((story) => story.id === customStory.body.data.id);
+    expect(customStoryForAlex).toMatchObject({ audience: "custom" });
+    expect(customStoryForAlex).not.toHaveProperty("audienceUserIds");
+    await request(app).get(uploaded.url).set("Authorization", alexAuthorization).expect(200);
+    await request(app).get(uploaded.url).set("Authorization", jordanAuthorization).expect(403);
+    await request(app).post(`/api/stories/${customStory.body.data.id}/view`).set("Authorization", jordanAuthorization).send({ reaction: "❤️" }).expect(404);
+    await request(app).post(`/api/stories/${customStory.body.data.id}/reply`).set("Authorization", jordanAuthorization).send({ content: "I should not see this" }).expect(404);
+
+    await request(app).post(`/api/stories/${customStory.body.data.id}/view`).set("Authorization", alexAuthorization).send({ reaction: "❤️" }).expect(200);
+    await request(app).post(`/api/stories/${customStory.body.data.id}/reply`).set("Authorization", alexAuthorization).send({ content: "Private reply" }).expect(201);
+    await request(app).post("/api/reports").set("Authorization", alexAuthorization).send({ targetType: "story", targetId: customStory.body.data.id, reason: "Test report" }).expect(201);
+
+    const viewers = await request(app).get(`/api/stories/${customStory.body.data.id}/viewers`).set("Authorization", mayaAuthorization).expect(200);
+    expect(viewers.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: "u-alex" })]));
+    await request(app).get(`/api/stories/${customStory.body.data.id}/viewers`).set("Authorization", jordanAuthorization).expect(403);
+    await request(app).delete(`/api/stories/${customStory.body.data.id}`).set("Authorization", jordanAuthorization).expect(403);
+
+    await request(app).post("/api/friends/u-maya").set("Authorization", alexAuthorization).send({ action: "block" }).expect(200);
+    const afterBlock = await request(app).get("/api/stories").set("Authorization", alexAuthorization).expect(200);
+    expect(afterBlock.body.data.some((story) => story.id === customStory.body.data.id)).toBe(false);
+    await request(app).post(`/api/stories/${customStory.body.data.id}/view`).set("Authorization", alexAuthorization).send({}).expect(404);
+    await request(app).post(`/api/stories/${customStory.body.data.id}/reply`).set("Authorization", alexAuthorization).send({ content: "Blocked reply" }).expect(404);
+
+    await request(app).delete(`/api/stories/${customStory.body.data.id}`).set("Authorization", mayaAuthorization).expect(204);
+    await request(app).post("/api/friends/u-maya").set("Authorization", alexAuthorization).send({ action: "unblock" }).expect(200);
+    await request(app).get(uploaded.url).set("Authorization", alexAuthorization).expect(403);
   });
 
   it("records declined and cancelled friend request states", async () => {

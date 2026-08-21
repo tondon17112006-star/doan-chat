@@ -3,18 +3,25 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import {
   createCall,
   createStory,
+  createRealtimeNotification,
+  deleteStory,
   assertOwnedUploadPurpose,
   friendAction,
   getCalls,
   getNotifications,
   getStories,
+  getStoryViewers,
   isDirectConversationBlocked,
   listFriendRequests,
   listFriends,
   markNotificationsRead,
+  markMessageDelivered,
+  replyToStory,
   viewStory,
 } from "../services/dataService.js";
 import { AppError } from "../utils/AppError.js";
+import { cleanText } from "../utils/helpers.js";
+import { emitToUsers, onlineUserIds } from "../services/realtimeService.js";
 
 export const stories = asyncHandler(async (request, response) => {
   response.json({ success: true, data: await getStories(request.user.id) });
@@ -31,6 +38,40 @@ export const seeStory = asyncHandler(async (request, response) => {
   const story = await viewStory(request.params.id, request.user.id, request.body.reaction);
   if (!story) throw new AppError("Story not found.", 404);
   response.json({ success: true, data: story });
+});
+
+export const removeStory = asyncHandler(async (request, response) => {
+  const result = await deleteStory(request.params.id, request.user.id);
+  if (!result) throw new AppError("Story not found.", 404);
+  request.app.get("io")?.emit("story:delete", { id: result.id });
+  response.status(204).end();
+});
+
+export const storyViewers = asyncHandler(async (request, response) => {
+  const viewers = await getStoryViewers(request.params.id, request.user.id);
+  if (!viewers) throw new AppError("Story not found.", 404);
+  response.json({ success: true, data: viewers });
+});
+
+export const replyStory = asyncHandler(async (request, response) => {
+  const content = cleanText(request.body.content);
+  if (!content) throw new AppError("A story reply cannot be empty.", 422);
+  const result = await replyToStory(request.params.id, request.user.id, content);
+  if (!result) throw new AppError("Story not found or unavailable.", 404);
+
+  const io = request.app.get("io");
+  const onlineRecipients = io ? await onlineUserIds(io, [result.recipientId]) : [];
+  const message = onlineRecipients.length ? await markMessageDelivered(result.message.id) : result.message;
+  emitToUsers(io, [request.user.id, result.recipientId], "message:new", message || result.message);
+  if (!onlineRecipients.includes(result.recipientId)) {
+    await createRealtimeNotification(result.recipientId, request.user.id, {
+      type: "message",
+      title: `New story reply from ${request.user.username}`,
+      body: content,
+      data: { conversationId: result.conversation.id, messageId: result.message.id, storyId: request.params.id },
+    });
+  }
+  response.status(201).json({ success: true, data: { conversation: result.conversation, message: message || result.message } });
 });
 
 export const notifications = asyncHandler(async (request, response) => {

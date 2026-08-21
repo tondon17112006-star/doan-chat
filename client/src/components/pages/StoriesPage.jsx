@@ -72,20 +72,28 @@ function CreateStoryModal({ open, onClose }) {
   const [file, setFile] = useState(null);
   const [caption, setCaption] = useState("");
   const [preview, setPreview] = useState("");
+  const [audience, setAudience] = useState("everyone");
+  const [audienceUserIds, setAudienceUserIds] = useState([]);
+  const [error, setError] = useState("");
   const inputRef = useRef(null);
   const queryClient = useQueryClient();
+  const audienceUsers = useQuery({ queryKey: ["story-audience-users"], queryFn: () => socialApi.users(), enabled: open && audience === "custom" });
   const mutation = useMutation({
     mutationFn: async () => {
       const [uploaded] = await chatApi.upload([file], "story");
-      return socialApi.addStory({ type: file.type.startsWith("video/") ? "video" : "image", mediaUrl: uploaded.url, caption });
+      return socialApi.addStory({ type: file.type.startsWith("video/") ? "video" : "image", mediaUrl: uploaded.url, caption, audience, audienceUserIds: audience === "custom" ? audienceUserIds : [] });
     },
+    onMutate: () => setError(""),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["stories"] });
       setFile(null);
       setPreview("");
       setCaption("");
+      setAudience("everyone");
+      setAudienceUserIds([]);
       onClose();
-    }
+    },
+    onError: (requestError) => setError(requestError.response?.data?.message || "Could not share this story."),
   });
 
   function choose(event) {
@@ -93,6 +101,10 @@ function CreateStoryModal({ open, onClose }) {
     if (!selected) return;
     setFile(selected);
     setPreview(URL.createObjectURL(selected));
+  }
+
+  function toggleAudienceUser(id) {
+    setAudienceUserIds((current) => current.includes(id) ? current.filter((userId) => userId !== id) : [...current, id]);
   }
 
   return (
@@ -105,7 +117,13 @@ function CreateStoryModal({ open, onClose }) {
           <button type="button" className="story-dropzone" onClick={() => inputRef.current?.click()}><HiPhoto /><strong>Choose a photo or video</strong><span>JPG, PNG, WEBP, MP4 or MOV</span></button>
         )}
         <label><span>Caption</span><textarea value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Say a little something…" maxLength={500} /></label>
-        <button type="button" className="primary-button" disabled={!file || mutation.isPending} onClick={() => mutation.mutate()}>
+        <label><span>Who can view?</span><select value={audience} onChange={(event) => { setAudience(event.target.value); setAudienceUserIds([]); }}><option value="everyone">Everyone</option><option value="friends">Friends</option><option value="custom">Custom people</option></select></label>
+        {audience === "custom" && <div className="story-audience-picker">
+          <strong>Choose people</strong>
+          {audienceUsers.isLoading ? <span>Loading people…</span> : audienceUsers.isError ? <span className="story-form-error">Could not load people.</span> : !(audienceUsers.data || []).length ? <span>No people are available.</span> : (audienceUsers.data || []).map((person) => <label key={person.id}><input type="checkbox" checked={audienceUserIds.includes(person.id)} onChange={() => toggleAudienceUser(person.id)} /><Avatar user={person} size="sm" /><span>{person.username}</span></label>)}
+        </div>}
+        {error && <p className="story-form-error" role="alert">{error}</p>}
+        <button type="button" className="primary-button" disabled={!file || mutation.isPending || (audience === "custom" && !audienceUserIds.length)} onClick={() => mutation.mutate()}>
           {mutation.isPending ? "Sharing…" : "Share story"}
         </button>
       </div>

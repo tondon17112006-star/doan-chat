@@ -2575,6 +2575,22 @@ kbd {
 .story-reply input::placeholder { color:rgba(255,255,255,.65); }
 .story-reply button { width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:50%;color:white;background:var(--accent); }
 .story-reply input:disabled,.story-reply button:disabled { cursor:not-allowed;opacity:.6; }
+.story-owner-action { width:auto !important; height:25px !important; margin-left:auto; padding:0 8px !important; color:var(--red) !important; background:color-mix(in srgb,var(--red) 10%,transparent) !important; font-size:8px !important; }
+.story-viewer-state { width:min(340px,calc(100vw - 40px)); padding:28px; text-align:center; }
+.story-viewer-state h3 { margin:0 0 8px; font:750 15px "Manrope",sans-serif; }
+.story-viewer-state p { margin:0 0 16px; color:var(--text-soft); font-size:10px; line-height:1.5; }
+.story-viewers { margin:10px 14px 0; padding:9px; border-radius:9px; color:var(--text-soft); background:var(--surface-soft); font-size:8px; }
+.story-viewers > strong { display:block; margin-bottom:6px; color:var(--text); font-size:9px; }
+.story-viewers > div { display:flex; flex-wrap:wrap; gap:6px; }
+.story-viewers > div > span { display:inline-flex; align-items:center; gap:4px; }
+.story-viewers .avatar { transform:scale(.8); transform-origin:left center; margin-right:-4px; }
+.story-report { width:auto !important; padding:0 7px !important; color:var(--red) !important; font-size:8px !important; }
+.story-audience-picker { max-height:160px; overflow:auto; padding:9px; border:1px solid var(--border); border-radius:9px; background:var(--surface-soft); }
+.story-audience-picker > strong,.story-audience-picker > span { display:block; margin-bottom:7px; color:var(--text-soft); font-size:9px; }
+.story-audience-picker label { display:flex; align-items:center; gap:7px; padding:4px 0; font-size:9px; }
+.story-audience-picker input { width:auto; }
+.story-audience-picker .avatar { transform:scale(.8); transform-origin:left center; margin-right:-4px; }
+.story-form-error { margin:0; color:var(--red); font-size:9px; }
 .story-reply-error { margin: 7px 5px 0; color: #ffd0d5; font-size: 8px; text-align: center; }
 .story-nav { position:absolute;top:50%;width:44px;height:44px;display:grid;place-items:center;border:0;border-radius:50%;color:white;background:rgba(255,255,255,.12);backdrop-filter:blur(10px);font-size:20px; }
 .story-nav.previous { left:max(25px,calc(50% - 270px)); }
@@ -2613,7 +2629,14 @@ kbd {
 .call-person { position:relative;z-index:1;text-align:center; }
 .call-person h2 { margin:23px 0 6px;font:750 28px "Manrope",sans-serif; }
 .call-person p { margin:0;color:rgba(255,255,255,.65);font-size:12px; }
-.call-media-error { display:block;max-width:320px;margin:12px auto 0;color:#ffd3d8;font-size:10px;line-height:1.45; }
+.call-media-status { position:absolute;z-index:4;top:22px;left:50%;width:min(440px,calc(100% - 32px));transform:translateX(-50%);text-align:center; }
+.call-media-error,.call-media-warning { display:block;max-width:420px;margin:7px auto 0;padding:8px 11px;border-radius:10px;font-size:10px;line-height:1.45; }
+.call-media-error { color:#ffd3d8;background:rgba(107,27,37,.62); }
+.call-media-warning { color:#ffe6aa;background:rgba(91,66,13,.6); }
+.call-device-controls { position:absolute;z-index:4;top:25px;left:25px;display:flex;flex-wrap:wrap;gap:7px;max-width:min(52vw,590px); }
+.call-device-controls label { display:flex;align-items:center;gap:6px;padding:6px 8px;border:1px solid rgba(255,255,255,.16);border-radius:9px;color:rgba(255,255,255,.85);background:rgba(18,20,30,.6);backdrop-filter:blur(14px);font-size:9px; }
+.call-device-controls select { max-width:130px;border:0;color:white;background:transparent;font:inherit;outline:0; }
+.call-device-controls option { color:#242633;background:white; }
 .remote-video { width:100%;height:100%;object-fit:cover; }
 .local-video { position:absolute;z-index:3;top:25px;right:25px;width:min(230px,24vw);aspect-ratio:3/4;object-fit:cover;border:2px solid rgba(255,255,255,.25);border-radius:18px;box-shadow:0 15px 40px rgba(0,0,0,.3); }
 .local-video.hidden { opacity:0; }
@@ -2708,6 +2731,9 @@ kbd {
   .search-results { max-height:calc(90vh - 62px); }
   .story-nav { display:none; }
   .local-video { top:16px;right:16px;width:110px;border-radius:13px; }
+  .call-device-controls { top:16px;left:16px;max-width:calc(100% - 32px); }
+  .call-device-controls label { max-width:145px; }
+  .call-device-controls select { max-width:85px; }
   .call-controls { bottom:35px;gap:5px;padding:8px; }
   .call-controls button { width:52px;font-size:7px; }
   .call-controls button > svg { width:43px;height:43px;padding:12px; }
