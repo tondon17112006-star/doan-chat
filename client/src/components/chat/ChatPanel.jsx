@@ -117,6 +117,10 @@ export default function ChatPanel() {
   }, [conversationId, user.id]);
 
   async function startCall(type) {
+    if (conversation?.type !== "direct") {
+      setRealtimeError("Group calls are not available yet. Lumina currently supports secure one-to-one calls only.");
+      return;
+    }
     const socket = getSocket();
     if (!socket?.connected) {
       setRealtimeError("Realtime is reconnecting. Please wait before starting a call.");
@@ -202,8 +206,8 @@ export default function ChatPanel() {
             </>
           )}
           <div className="chat-actions">
-            <IconButton icon={<HiOutlinePhone />} label="Voice call" onClick={() => startCall("voice")} />
-            <IconButton icon={<HiOutlineVideoCamera />} label="Video call" onClick={() => startCall("video")} />
+            {conversation.type === "direct" && <IconButton icon={<HiOutlinePhone />} label="Voice call" onClick={() => startCall("voice")} />}
+            {conversation.type === "direct" && <IconButton icon={<HiOutlineVideoCamera />} label="Video call" onClick={() => startCall("video")} />}
             <IconButton icon={<HiOutlineInformationCircle />} label="Conversation details" active={detailOpen} onClick={toggleDetails} />
             <IconButton icon={<HiEllipsisHorizontal />} label="More options" className="desktop-more" />
           </div>
@@ -236,7 +240,7 @@ export default function ChatPanel() {
             animate={{ width: 330, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
           >
-            <ConversationDetails conversation={conversation} otherUser={otherUser} onCall={startCall} />
+            <ConversationDetails conversation={conversation} otherUser={otherUser} onCall={startCall} callSupported={conversation.type === "direct"} />
           </motion.div>
         )}
       </AnimatePresence>

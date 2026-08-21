@@ -2,12 +2,11 @@ import { readFile } from "node:fs/promises";
 import multer from "multer";
 import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { AppError } from "../utils/AppError.js";
+import { getStorageProvider } from "../services/storageProvider.js";
 
-const directory = path.dirname(fileURLToPath(import.meta.url));
-export const uploadDirectory = path.resolve(directory, "../uploads");
+export const uploadDirectory = getStorageProvider("local").resolveWritePath("");
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 export const MAX_FILES_PER_REQUEST = 10;
 
@@ -45,7 +44,14 @@ function invalidUpload(message) {
 }
 
 const storage = multer.diskStorage({
-  destination: uploadDirectory,
+  destination: async (_request, _file, callback) => {
+    try {
+      await getStorageProvider("local").prepare();
+      callback(null, uploadDirectory);
+    } catch (error) {
+      callback(error);
+    }
+  },
   filename: (_request, file, callback) => {
     const type = uploadType(file.mimetype);
     if (!type) return callback(invalidUpload("This file type is not allowed."));

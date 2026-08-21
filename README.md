@@ -91,10 +91,23 @@ MONGODB_URI_TEST=mongodb://127.0.0.1:27017/lumina_ci npm run test:mongo -w serve
 - `npm run build` — build the production client.
 - `npm test` — run server and client tests.
 - `docker compose up --build` — run web, API, MongoDB and Redis containers.
+- `npm run cleanup:uploads -w server -- --grace-hours=24 --limit=100` — remove
+  upload records and local files that are no longer referenced.
 
-Uploaded files are stored under `server/uploads` in local development. Configure
-an object-storage adapter before using the project in a multi-instance production
-deployment.
+Uploaded files use a storage-provider abstraction. `local` is the default and
+stores files under `server/uploads` unless `LOCAL_UPLOAD_DIR` points to a
+persistent volume. API URLs stay behind `/api/uploads/:filename`, so private
+attachments, avatars and stories always pass through authorization before a file
+is returned. The legacy `/uploads/:filename` route only serves records explicitly
+marked as public demo uploads.
+
+The interfaces for `s3`, `r2` and `cloudinary` are reserved for production
+adapters, but this repository does not include their SDKs or credentials yet. Do
+not set `STORAGE_PROVIDER` to a cloud value until an adapter is implemented and
+tested. A malware scan should be integrated after MIME/magic-byte validation and
+before `registerUploads` records metadata; reject or quarantine the file there
+without returning a usable URL. This project intentionally does not simulate
+virus scanning.
 
 ## Development checks
 
@@ -162,6 +175,12 @@ Server variables:
   `REFRESH_TOKEN_TTL`
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`
 - `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL` when the AI integration is enabled
+- `STORAGE_PROVIDER` (`local` by default), `LOCAL_UPLOAD_DIR` for local upload
+  volumes, and future cloud-provider configuration such as `S3_BUCKET`,
+  `S3_REGION`, `S3_ENDPOINT`, `R2_BUCKET`, `R2_ENDPOINT`,
+  `CLOUDINARY_CLOUD_NAME`. Store cloud access keys only in the secret manager
+  once the adapter is implemented; do not add them to `.env.example` or client
+  variables.
 - `STUN_URL` or `STUN_URLS`; `TURN_URL` or `TURN_URLS`, `TURN_USERNAME`, and
   `TURN_CREDENTIAL` (or `TURN_PASSWORD`) for WebRTC
 - `CALL_TIMEOUT_MS` for the server-managed ring timeout
@@ -175,6 +194,18 @@ Client build variables:
 production. `MONGODB_URI_TEST` is only for an isolated integration-test database.
 Never place server secrets in a `VITE_*` variable because those values are public
 inside the browser bundle.
+
+### Calling and future group calls
+
+Lumina currently supports one-to-one WebRTC calls only. The server rejects group
+conversations for `call:start`, and the client intentionally hides group-call
+controls instead of presenting a non-working experience. A production group-call
+implementation needs an SFU plus server-owned room membership and should add
+authenticated `call:join`, `call:leave`, `call:participant-joined`,
+`call:participant-left`, and per-participant negotiation events. Persist a call
+room and participant state separately from the per-user call history, then let
+the SFU issue short-lived TURN credentials. Do not put TURN credentials in client
+source, `.env.example`, or any `VITE_*` value.
 
 ## MongoDB backup and restore
 

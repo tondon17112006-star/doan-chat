@@ -25,7 +25,7 @@ import { useUiStore } from "../../store/uiStore.js";
 import { SecureImage, SecureVideo, downloadPrivateUpload } from "../../hooks/usePrivateUploadUrl.jsx";
 import { formatAttachmentBytes, getSharedItems } from "../../utils/conversationShared.js";
 
-export default function ConversationDetails({ conversation, otherUser, onCall }) {
+export default function ConversationDetails({ conversation, otherUser, onCall, callSupported = false }) {
   const [muted, setMuted] = useState(conversation.muted);
   const [openSection, setOpenSection] = useState("members");
   const [memberDialogOpen, setMemberDialogOpen] = useState(false);
@@ -140,8 +140,8 @@ export default function ConversationDetails({ conversation, otherUser, onCall })
         <h2>{conversation.name}</h2>
         <p>{title}</p>
         <div className="detail-quick-actions">
-          <button type="button" onClick={() => onCall("voice")}><span><HiOutlinePhone /></span><small>Audio</small></button>
-          <button type="button" onClick={() => onCall("video")}><span><HiOutlineVideoCamera /></span><small>Video</small></button>
+          {callSupported && <button type="button" onClick={() => onCall("voice")}><span><HiOutlinePhone /></span><small>Audio</small></button>}
+          {callSupported && <button type="button" onClick={() => onCall("video")}><span><HiOutlineVideoCamera /></span><small>Video</small></button>}
           <button type="button" onClick={toggleMute} disabled={updateMutation.isPending}><span>{muted ? <HiOutlineBellSlash /> : <HiBell />}</span><small>{muted ? "Unmute" : "Mute"}</small></button>
           <button type="button" onClick={() => setSearchOpen(true)}><span><HiMagnifyingGlass /></span><small>Search</small></button>
         </div>

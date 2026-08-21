@@ -4,6 +4,8 @@ import { createStringIdSchema } from "./modelHelpers.js";
 const uploadSchema = createStringIdSchema(
   {
     filename: { type: String, required: true, trim: true, maxlength: 255 },
+    storageProvider: { type: String, enum: ["local", "s3", "r2", "cloudinary"], default: "local", index: true },
+    storageKey: { type: String, required: true, trim: true, maxlength: 512 },
     ownerId: { type: String, required: true, index: true },
     originalName: { type: String, required: true, maxlength: 255 },
     mimeType: { type: String, required: true, maxlength: 160 },
@@ -11,12 +13,16 @@ const uploadSchema = createStringIdSchema(
     purpose: { type: String, enum: ["attachment", "avatar", "story"], default: "attachment", index: true },
     conversationIds: { type: [String], default: [] },
     publicDemo: { type: Boolean, default: false, index: true },
+    status: { type: String, enum: ["active", "deleted"], default: "active", index: true },
+    deletedAt: { type: Date, default: null },
   },
   { collection: "lumina_uploads" },
 );
 
 uploadSchema.index({ filename: 1 }, { unique: true });
+uploadSchema.index({ storageProvider: 1, storageKey: 1 }, { unique: true });
 uploadSchema.index({ ownerId: 1, createdAt: -1 });
 uploadSchema.index({ conversationIds: 1 });
+uploadSchema.index({ status: 1, createdAt: 1 });
 
 export const Upload = mongoose.models.Upload || mongoose.model("Upload", uploadSchema);

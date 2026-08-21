@@ -9,10 +9,14 @@ export const webrtcConfig = {
   callTimeoutMs: Math.min(Math.max(Number(process.env.CALL_TIMEOUT_MS) || 30_000, 10_000), 120_000),
 };
 
+export function turnConfigured() {
+  return Boolean(turnUrls.length && process.env.TURN_USERNAME && (process.env.TURN_CREDENTIAL || process.env.TURN_PASSWORD));
+}
+
 export function getIceServers() {
   const servers = [{ urls: stunUrls.length ? stunUrls : ["stun:stun.l.google.com:19302"] }];
   const username = process.env.TURN_USERNAME;
   const credential = process.env.TURN_CREDENTIAL || process.env.TURN_PASSWORD;
-  if (turnUrls.length && username && credential) servers.push({ urls: turnUrls, username, credential });
+  if (turnConfigured()) servers.push({ urls: turnUrls, username, credential });
   return servers;
 }

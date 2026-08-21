@@ -7,6 +7,7 @@ import { ensureMongoIndexes } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
 import { publicUser, unique } from "../utils/helpers.js";
 import * as mongoData from "./mongoDataService.js";
+import { getStorageProvider, storageProviderName } from "./storageProvider.js";
 
 let users = [];
 let conversations = [];
@@ -21,6 +22,7 @@ let uploads = [];
 let reports = [];
 
 export const USER_UPLOAD_QUOTA_BYTES = 250 * 1024 * 1024;
+export const ORPHAN_UPLOAD_GRACE_MS = 24 * 60 * 60 * 1000;
 
 const now = () => new Date().toISOString();
 const makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
@@ -29,7 +31,7 @@ const defaultSettings = () => ({
   theme: "system",
   chatWallpaper: "aurora",
   language: "en",
-  notifications: { messages: true, calls: true, friendRequests: true, sound: true, desktop: false },
+  notifications: { messages: true, calls: true, friendRequests: true, sound: true, desktop: false, privateMode: false },
   privacy: { readReceipts: true, lastSeen: "everyone", profilePhoto: "everyone" },
 });
 
@@ -223,10 +225,14 @@ function localUploadFilename(url) {
   return match?.[1] || null;
 }
 
+function uploadUrlForRecord(record) {
+  return `/api/uploads/${record.filename}`;
+}
+
 export async function assertUploadQuota(userId, incomingBytes) {
   if (databaseReady()) return mongoData.assertUploadQuota(userId, incomingBytes);
   const usedBytes = uploads
-    .filter((item) => item.ownerId === String(userId))
+    .filter((item) => item.ownerId === String(userId) && item.status !== "deleted")
     .reduce((total, item) => total + Math.max(0, Number(item.size) || 0), 0);
   if (usedBytes + Math.max(0, Number(incomingBytes) || 0) > USER_UPLOAD_QUOTA_BYTES) {
     throw new AppError("Your upload storage quota is full. Delete older files or try a smaller upload.", 413);
@@ -239,6 +245,8 @@ export async function registerUploads(userId, files, purpose = "attachment") {
   const records = files.map((file) => ({
     id: String(file.filename),
     filename: String(file.filename),
+    storageProvider: file.storageProvider || storageProviderName(),
+    storageKey: String(file.storageKey || file.filename),
     ownerId: String(userId),
     originalName: String(file.originalName),
     mimeType: String(file.mimeType),
@@ -246,6 +254,8 @@ export async function registerUploads(userId, files, purpose = "attachment") {
     purpose,
     conversationIds: [],
     publicDemo: false,
+    status: "active",
+    deletedAt: null,
     createdAt: timestamp,
   }));
   uploads.push(...records);
@@ -255,16 +265,20 @@ export async function registerUploads(userId, files, purpose = "attachment") {
 
 export async function findUploadByFilename(filename) {
   if (databaseReady()) return mongoData.findUploadByFilename(filename);
-  const record = uploads.find((item) => item.filename === String(filename));
+  const record = uploads.find((item) => item.filename === String(filename) && item.status !== "deleted");
   return record ? clone(record) : null;
 }
 
 export async function canUserReadUpload(userId, filename) {
   if (databaseReady()) return mongoData.canUserReadUpload(userId, filename);
-  const record = uploads.find((item) => item.filename === String(filename));
+  const record = uploads.find((item) => item.filename === String(filename) && item.status !== "deleted");
   if (!record) return false;
-  if (record.publicDemo || record.purpose === "story") return true;
+  if (record.publicDemo) return true;
   if (record.ownerId === String(userId)) return true;
+  if (record.purpose === "story") {
+    const story = stories.find((item) => item.mediaUrl === uploadUrlForRecord(record));
+    return Boolean(story && canAccessStory(story, userId));
+  }
   if (record.purpose === "avatar") return canViewPrivacySetting(userId, record.ownerId, privacySettingsFor(record.ownerId).privacy?.profilePhoto);
   return (record.conversationIds || []).some((conversationId) => {
     const conversation = conversations.find((item) => item.id === String(conversationId));
@@ -274,7 +288,7 @@ export async function canUserReadUpload(userId, filename) {
 
 export async function findPublicDemoUpload(filename) {
   if (databaseReady()) return mongoData.findPublicDemoUpload(filename);
-  const record = uploads.find((item) => item.filename === String(filename) && item.publicDemo === true);
+  const record = uploads.find((item) => item.filename === String(filename) && item.publicDemo === true && item.status !== "deleted");
   return record ? clone(record) : null;
 }
 
@@ -282,7 +296,7 @@ export async function assertOwnedUploadPurpose(userId, url, purpose) {
   if (databaseReady()) return mongoData.assertOwnedUploadPurpose(userId, url, purpose);
   const filename = localUploadFilename(url);
   if (!filename) return;
-  const record = uploads.find((item) => item.filename === filename);
+  const record = uploads.find((item) => item.filename === filename && item.status !== "deleted");
   if (!record) throw new AppError("This uploaded file was not found.", 404);
   if (record.ownerId !== String(userId) || record.purpose !== purpose) {
     throw new AppError("You do not have permission to use this uploaded file here.", 403);
@@ -298,7 +312,7 @@ async function claimMessageAttachments(userId, conversationId, attachments) {
       claimed.push(clone(attachment));
       continue;
     }
-    const record = uploads.find((item) => item.filename === filename);
+    const record = uploads.find((item) => item.filename === filename && item.status !== "deleted");
     if (!record) throw new AppError("This uploaded file was not found.", 404);
     if (record.purpose !== "attachment") throw new AppError("This file cannot be attached to a chat message.", 400);
     const wasAlreadyAccessible = (record.conversationIds || []).some((id) => {
@@ -317,12 +331,40 @@ async function claimMessageAttachments(userId, conversationId, attachments) {
       name: record.originalName,
       type: record.mimeType,
       size: record.size,
-      url: `/api/uploads/${record.filename}`,
+      url: uploadUrlForRecord(record),
       ...(attachment.duration ? { duration: Math.max(0, Number(attachment.duration) || 0) } : {}),
     });
   }
   await Promise.all(changes.map((record) => persist("uploads", record)));
   return claimed;
+}
+
+function uploadIsReferenced(record) {
+  const url = uploadUrlForRecord(record);
+  if (record.publicDemo) return true;
+  if (record.purpose === "attachment") return (record.conversationIds || []).length > 0 || messages.some((message) => (message.attachments || []).some((attachment) => attachment.url === url));
+  if (record.purpose === "avatar") return users.some((user) => user.avatar === url || user.coverPhoto === url) || conversations.some((conversation) => conversation.avatar === url);
+  if (record.purpose === "story") return stories.some((story) => story.mediaUrl === url);
+  return false;
+}
+
+export async function cleanupOrphanUploads(options = {}) {
+  if (databaseReady()) return mongoData.cleanupOrphanUploads(options);
+  const graceMs = Number.isFinite(Number(options.graceMs)) ? Number(options.graceMs) : ORPHAN_UPLOAD_GRACE_MS;
+  const limit = Math.max(1, Math.min(500, Number(options.limit) || 100));
+  const cutoff = Date.now() - Math.max(0, graceMs);
+  const candidates = uploads
+    .filter((record) => record.status !== "deleted" && new Date(record.createdAt || 0).getTime() <= cutoff && !uploadIsReferenced(record))
+    .slice(0, limit);
+  const removed = [];
+  for (const record of candidates) {
+    await getStorageProvider(record.storageProvider || "local").remove(record.storageKey || record.filename);
+    record.status = "deleted";
+    record.deletedAt = now();
+    removed.push(clone(record));
+    await persist("uploads", record);
+  }
+  return { scanned: candidates.length, removed: removed.length, uploads: removed };
 }
 
 export async function isDirectConversationBlocked(conversationId, userId) {
@@ -631,19 +673,23 @@ export async function getStories(userId) {
   if (databaseReady()) return mongoData.getStories(userId);
   return stories
     .filter((story) => !story.expiresAt || new Date(story.expiresAt) > new Date())
-    .filter((story) => !memoryIsBlockedBetween(userId, story.userId))
-    .map((story) => ({ ...clone(story), user: presentUserForViewer(users.find((user) => user.id === story.userId), userId) }))
+    .filter((story) => canAccessStory(story, userId))
+    .map((story) => presentStory(story, userId))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
 export async function createStory(userId, input) {
   if (databaseReady()) return mongoData.createStory(userId, input);
+  const audience = normalizeStoryAudience(input.audience);
+  const audienceUserIds = validateStoryAudienceUsers(userId, audience, input.audienceUserIds);
   const story = {
     id: makeId("s"),
     userId: String(userId),
     type: input.type === "video" ? "video" : "image",
     mediaUrl: input.mediaUrl,
     caption: input.caption || "",
+    audience,
+    audienceUserIds,
     viewers: [],
     reactions: [],
     createdAt: now(),
@@ -651,17 +697,81 @@ export async function createStory(userId, input) {
   };
   stories.push(story);
   await persist("stories", story);
-  return { ...clone(story), user: presentUserForViewer(users.find((user) => user.id === String(userId)), userId) };
+  return presentStory(story, userId);
 }
 
 export async function viewStory(id, userId, reaction) {
   if (databaseReady()) return mongoData.viewStory(id, userId, reaction);
   const story = stories.find((item) => item.id === String(id));
-  if (!story || memoryIsBlockedBetween(userId, story.userId)) return null;
-  story.viewers = unique([...(story.viewers || []), userId]);
-  if (reaction) story.reactions.push({ userId: String(userId), emoji: reaction, createdAt: now() });
+  if (!story || !canAccessStory(story, userId)) return null;
+  if (String(story.userId) !== String(userId)) {
+    story.viewers = unique([...(story.viewers || []), userId]);
+    if (reaction) story.reactions.push({ userId: String(userId), emoji: reaction, createdAt: now() });
+  }
   await persist("stories", story);
-  return clone(story);
+  return presentStory(story, userId);
+}
+
+export async function deleteStory(id, userId) {
+  if (databaseReady()) return mongoData.deleteStory(id, userId);
+  const index = stories.findIndex((story) => story.id === String(id));
+  if (index < 0) return null;
+  if (stories[index].userId !== String(userId)) throw new AppError("Only the story owner can delete it.", 403);
+  const [story] = stories.splice(index, 1);
+  await removePersisted("stories", story.id);
+  return { id: story.id, deleted: true };
+}
+
+export async function getStoryViewers(id, userId) {
+  if (databaseReady()) return mongoData.getStoryViewers(id, userId);
+  const story = stories.find((item) => item.id === String(id));
+  if (!story) return null;
+  if (story.userId !== String(userId)) throw new AppError("Only the story owner can view its viewers.", 403);
+  return (story.viewers || [])
+    .map((viewerId) => users.find((user) => user.id === String(viewerId)))
+    .filter(Boolean)
+    .map((viewer) => presentUserForViewer(viewer, userId));
+}
+
+export async function replyToStory(id, userId, content) {
+  if (databaseReady()) return mongoData.replyToStory(id, userId, content);
+  const story = stories.find((item) => item.id === String(id));
+  if (!story || String(story.userId) === String(userId) || !canAccessStory(story, userId)) return null;
+  const conversation = await createConversation(userId, { type: "direct", participants: [story.userId] });
+  if (!conversation) return null;
+  const message = await createMessage(userId, conversation.id, { type: "text", content });
+  return message ? { conversation, message, recipientId: String(story.userId) } : null;
+}
+
+function normalizeStoryAudience(value) {
+  return ["everyone", "friends", "custom"].includes(value) ? value : "everyone";
+}
+
+function validateStoryAudienceUsers(ownerId, audience, input) {
+  if (audience !== "custom") return [];
+  const ids = unique(Array.isArray(input) ? input.filter(Boolean) : []).filter((id) => String(id) !== String(ownerId));
+  if (!ids.length) throw new AppError("Choose at least one person for a custom story audience.", 422);
+  if (ids.length > 100 || ids.some((id) => !users.some((user) => user.id === String(id)))) {
+    throw new AppError("One or more custom audience members do not exist.", 422);
+  }
+  return ids;
+}
+
+function canAccessStory(story, viewerId) {
+  if (String(story.userId) === String(viewerId)) return true;
+  if (memoryIsBlockedBetween(viewerId, story.userId)) return false;
+  if ((story.audience || "everyone") === "everyone") return true;
+  if (story.audience === "friends") return relationshipFor(viewerId, story.userId) === "friends";
+  return (story.audienceUserIds || []).map(String).includes(String(viewerId));
+}
+
+function presentStory(story, viewerId) {
+  const value = clone(story);
+  value.user = presentUserForViewer(users.find((user) => user.id === value.userId), viewerId);
+  value.viewerCount = (value.viewers || []).length;
+  delete value.viewers;
+  if (String(value.userId) !== String(viewerId)) delete value.audienceUserIds;
+  return value;
 }
 
 export async function getNotifications(userId) {

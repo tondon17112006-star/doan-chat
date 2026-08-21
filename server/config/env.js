@@ -30,5 +30,21 @@ export const env = {
     apiKey: process.env.AI_API_KEY,
     model: process.env.AI_MODEL,
   },
+  storage: {
+    provider: process.env.STORAGE_PROVIDER || "local",
+    localUploadDir: process.env.LOCAL_UPLOAD_DIR || "",
+    s3: {
+      bucket: process.env.S3_BUCKET || "",
+      region: process.env.S3_REGION || "",
+      endpoint: process.env.S3_ENDPOINT || "",
+    },
+    r2: {
+      bucket: process.env.R2_BUCKET || "",
+      endpoint: process.env.R2_ENDPOINT || "",
+    },
+    cloudinary: {
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
+    },
+  },
   isProduction: process.env.NODE_ENV === "production",
 };

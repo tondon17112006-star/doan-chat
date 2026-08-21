@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getIceServers, webrtcConfig } from "../config/webrtc.js";
+import { getIceServers, turnConfigured, webrtcConfig } from "../config/webrtc.js";
 import { redisClient } from "../config/redis.js";
 import {
   createCall,
@@ -40,10 +40,10 @@ export function registerSocketHandlers(io) {
     socket.join(userId);
     const online = await setUserPresence(user.id, true);
     if (!wasOnline) socket.broadcast.emit("presence:update", { userId: user.id, isOnline: true });
-    emitSocket(socket, "webrtc:config", { iceServers: getIceServers(), callTimeoutMs: CALL_TIMEOUT_MS });
+    emitSocket(socket, "webrtc:config", { iceServers: getIceServers(), callTimeoutMs: CALL_TIMEOUT_MS, turnConfigured: turnConfigured() });
 
     socket.on("webrtc:config:request", (acknowledge) => {
-      const config = { iceServers: getIceServers(), callTimeoutMs: CALL_TIMEOUT_MS };
+      const config = { iceServers: getIceServers(), callTimeoutMs: CALL_TIMEOUT_MS, turnConfigured: turnConfigured() };
       if (typeof acknowledge === "function") acknowledge(config);
       else emitSocket(socket, "webrtc:config", config);
     });
@@ -73,6 +73,7 @@ export function registerSocketHandlers(io) {
       if (!user.verified) return acknowledge?.({ ok: false, error: "Please verify your email before placing a call." });
       const conversation = await getConversation(call.conversationId, user.id);
       if (!conversation) return acknowledge?.({ ok: false, error: "Conversation not found." });
+      if (conversation.type !== "direct") return acknowledge?.({ ok: false, error: "Group calls are not available yet." });
       const candidates = new Set(conversation.participants.map(String).filter((id) => id !== userId));
       const requested = Array.isArray(call.participants) ? call.participants.map(String) : [...candidates];
       const recipients = requested.filter((id) => candidates.has(id) && id !== userId);
@@ -99,9 +100,10 @@ export function registerSocketHandlers(io) {
 
       for (const targetId of allowedRecipients) {
         const status = online.has(targetId) ? "ringing" : "missed";
+        const endedAt = online.has(targetId) ? undefined : new Date().toISOString();
         const [outgoing, incoming] = await Promise.all([
-          createCall(userId, { conversationId: session.conversationId, peer: { id: targetId }, participants: [targetId], type: session.type, status, direction: "outgoing" }),
-          createCall(targetId, { conversationId: session.conversationId, peer: { id: userId }, participants: [userId], type: session.type, status, direction: "incoming" }),
+          createCall(userId, { conversationId: session.conversationId, peer: { id: targetId }, participants: [targetId], type: session.type, status, direction: "outgoing", endedAt }),
+          createCall(targetId, { conversationId: session.conversationId, peer: { id: userId }, participants: [userId], type: session.type, status, direction: "incoming", endedAt }),
         ]);
         session.records.push({ targetId, outgoingId: outgoing?.id, incomingId: incoming?.id, online: online.has(targetId) });
         if (online.has(targetId)) {
@@ -192,6 +194,7 @@ function emitSocket(socket, event, payload) {
 }
 
 async function canSignalCall(conversation, userId, targetId) {
+  if (conversation?.type !== "direct") return false;
   if (String(targetId) === String(userId)) return false;
   if (!conversation?.participants?.map(String).includes(String(targetId))) return false;
   return !(await isBlockedBetween(userId, targetId));
@@ -232,17 +235,32 @@ function clearPendingOffline(userId) {
 function scheduleOffline(io, user, socket) {
   const userId = String(user.id);
   clearPendingOffline(userId);
-  pendingOffline.set(userId, setTimeout(async () => {
-    const online = await onlineUserIds(io, [userId]);
-    if (online.length) return;
-    await setUserPresence(userId, false);
-    socket.broadcast.emit("presence:update", { userId, isOnline: false });
-    pendingOffline.delete(userId);
-  }, 750));
+    pendingOffline.set(userId, setTimeout(async () => {
+      const online = await onlineUserIds(io, [userId]);
+      if (online.length) return;
+      await setUserPresence(userId, false);
+      socket.broadcast.emit("presence:update", { userId, isOnline: false });
+      await finishCallsForDisconnectedUser(io, userId);
+      pendingOffline.delete(userId);
+    }, 750));
+}
+
+async function finishCallsForDisconnectedUser(io, userId) {
+  const sessions = (await activeCallSessions()).filter((session) => callParticipant(session, userId));
+  for (const session of sessions) {
+    const current = await readActiveCall(session.callId);
+    if (!current || !callParticipant(current, userId)) continue;
+    await finishCall(io, current, current.acceptedAt ? "ended" : "missed");
+    emitToUsers(io, [current.callerId, ...current.recipients], "call:ended", { callId: current.callId, conversationId: current.conversationId, userId, reason: "disconnect" });
+  }
 }
 
 function activeCallKey(callId) {
   return `lumina:call:${callId}`;
+}
+
+function activeCallIndexKey() {
+  return "lumina:calls:active";
 }
 
 async function readActiveCall(callId) {
@@ -258,11 +276,28 @@ async function readActiveCall(callId) {
 async function storeActiveCall(session) {
   activeCalls.set(session.callId, session);
   const redis = redisClient();
-  if (redis) await redis.set(activeCallKey(session.callId), JSON.stringify(session), "EX", Math.ceil(CALL_TIMEOUT_MS / 1_000) + 30);
+  if (redis) {
+    const lifetime = Math.ceil(CALL_TIMEOUT_MS / 1_000) + 30;
+    await redis.multi()
+      .set(activeCallKey(session.callId), JSON.stringify(session), "EX", lifetime)
+      .sadd(activeCallIndexKey(), session.callId)
+      .expire(activeCallIndexKey(), lifetime)
+      .exec();
+  }
 }
 
 async function removeActiveCall(callId) {
   activeCalls.delete(callId);
   const redis = redisClient();
-  if (redis) await redis.del(activeCallKey(callId));
+  if (redis) await redis.multi().del(activeCallKey(callId)).srem(activeCallIndexKey(), callId).exec();
+}
+
+async function activeCallSessions() {
+  const redis = redisClient();
+  if (!redis) return [...activeCalls.values()];
+  const callIds = await redis.smembers(activeCallIndexKey());
+  const sessions = await Promise.all(callIds.map((callId) => readActiveCall(callId)));
+  const missing = callIds.filter((callId, index) => !sessions[index]);
+  if (missing.length) await redis.srem(activeCallIndexKey(), ...missing);
+  return sessions.filter(Boolean);
 }

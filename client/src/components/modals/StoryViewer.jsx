@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { HiArrowLeft, HiArrowRight, HiPaperAirplane, HiXMark } from "react-icons/hi2";
 import { useUiStore } from "../../store/uiStore.js";
-import { chatApi, socialApi } from "../../services/api.js";
+import { socialApi } from "../../services/api.js";
 import Avatar from "../common/Avatar.jsx";
 import { useAuthStore } from "../../store/authStore.js";
 import { SecureImage, SecureVideo, usePrivateUploadUrl } from "../../hooks/usePrivateUploadUrl.jsx";
@@ -23,15 +23,16 @@ export default function StoryViewer() {
   const [progressKey, setProgressKey] = useState(0);
   const [replyError, setReplyError] = useState("");
   const [reactionError, setReactionError] = useState("");
-  const activeStory = stories.find((item) => item.id === story?.id) || story;
+  const [reportError, setReportError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const activeStory = stories.find((item) => item.id === story?.id) || null;
   const currentIndex = stories.findIndex((item) => item.id === activeStory?.id);
   const canNavigate = currentIndex >= 0 && !storiesLoading;
+  const isOwner = activeStory?.user?.id === user?.id;
   const backdropUrl = usePrivateUploadUrl(activeStory?.mediaUrl);
   const replyMutation = useMutation({
-    mutationFn: async ({ targetId, content }) => {
-      const conversation = await chatApi.createConversation({ type: "direct", participants: [targetId] });
-      return chatApi.send(conversation.id, { type: "text", content });
-    },
+    mutationFn: ({ content }) => socialApi.replyStory(activeStory.id, content),
     onMutate: () => setReplyError(""),
     onSuccess: () => {
       setReply("");
@@ -44,6 +45,22 @@ export default function StoryViewer() {
     onMutate: () => setReactionError(""),
     onError: (requestError) => setReactionError(requestError.response?.data?.message || "Could not react to this story."),
   });
+  const viewersQuery = useQuery({ queryKey: ["story-viewers", activeStory?.id], queryFn: () => socialApi.storyViewers(activeStory.id), enabled: Boolean(activeStory && isOwner) });
+  const deleteMutation = useMutation({
+    mutationFn: () => socialApi.deleteStory(activeStory.id),
+    onMutate: () => setDeleteError(""),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["stories"] }); setStory(null); },
+    onError: (requestError) => setDeleteError(requestError.response?.data?.message || "Could not delete this story."),
+  });
+  const reportMutation = useMutation({
+    mutationFn: () => socialApi.createReport({ targetType: "story", targetId: activeStory.id, reason: "Inappropriate story" }),
+    onMutate: () => setReportError(""),
+    onError: (requestError) => setReportError(requestError.response?.data?.message || "Could not report this story."),
+  });
+
+  useEffect(() => {
+    if (story && !storiesLoading && !activeStory) setStory(null);
+  }, [story, storiesLoading, activeStory, setStory]);
 
   useEffect(() => {
     if (!activeStory) return undefined;
@@ -67,7 +84,7 @@ export default function StoryViewer() {
   function sendReply() {
     const content = reply.trim();
     if (!content || !activeStory?.user?.id || activeStory.user.id === user?.id) return;
-    replyMutation.mutate({ targetId: activeStory.user.id, content });
+    replyMutation.mutate({ content });
   }
 
   function navigate(offset) {
@@ -78,6 +95,15 @@ export default function StoryViewer() {
 
   return (
     <AnimatePresence>
+      {!activeStory && story && (
+        <motion.div className="story-viewer" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+          <motion.div className="story-viewer-card story-viewer-state" initial={{ scale: 0.96, y: 15 }} animate={{ scale: 1, y: 0 }}>
+            <h3>{storiesLoading ? "Loading story…" : "Story unavailable"}</h3>
+            <p>{storiesLoading ? "Checking who can view this story." : storiesError ? "We could not refresh this story. It may no longer be available to you." : "This story is no longer available to you."}</p>
+            <button type="button" className="primary-button compact" onClick={() => setStory(null)}>Close</button>
+          </motion.div>
+        </motion.div>
+      )}
       {activeStory && (
         <motion.div className="story-viewer" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
           <div className="story-viewer-backdrop" style={{ backgroundImage: backdropUrl ? `url(${backdropUrl})` : undefined }} />
@@ -87,15 +113,19 @@ export default function StoryViewer() {
               <Avatar user={activeStory.user} size="sm" />
               <div><strong>{activeStory.user?.username}</strong><span>{relative(activeStory.createdAt)}</span></div>
               {canNavigate && <span className="story-position">{currentIndex + 1} / {stories.length}</span>}
+              {isOwner && <button type="button" className="story-owner-action" onClick={() => confirmDelete ? deleteMutation.mutate() : setConfirmDelete(true)} disabled={deleteMutation.isPending}>{deleteMutation.isPending ? "Deleting…" : confirmDelete ? "Confirm delete" : "Delete"}</button>}
               <button type="button" onClick={() => setStory(null)}><HiXMark /></button>
             </header>
             {activeStory.type === "video" ? <SecureVideo src={activeStory.mediaUrl} autoPlay controls /> : <SecureImage src={activeStory.mediaUrl} alt={activeStory.caption} />}
             {activeStory.caption && <div className="viewer-caption">{activeStory.caption}</div>}
+            {isOwner && <div className="story-viewers"><strong>Viewers ({activeStory.viewerCount || 0})</strong>{viewersQuery.isLoading ? <span>Loading…</span> : viewersQuery.isError ? <span className="story-reply-error">Could not load viewers.</span> : !(viewersQuery.data || []).length ? <span>No views yet.</span> : <div>{viewersQuery.data.map((viewer) => <span key={viewer.id}><Avatar user={viewer} size="sm" />{viewer.username}</span>)}</div>}</div>}
             <footer>
-              <div className="story-reactions">{["❤️", "😂", "😮", "👏"].map((emoji) => <button key={emoji} type="button" onClick={() => react(emoji)} disabled={reactionMutation.isPending}>{emoji}</button>)}</div>
-              <div className="story-reply"><input value={reply} onChange={(event) => setReply(event.target.value)} placeholder={activeStory.user?.id === user?.id ? "This is your story" : `Reply to ${activeStory.user?.username?.split(" ")[0]}…`} disabled={activeStory.user?.id === user?.id || replyMutation.isPending} onKeyDown={(event) => event.key === "Enter" && sendReply()} /><button type="button" onClick={sendReply} disabled={!reply.trim() || activeStory.user?.id === user?.id || replyMutation.isPending} aria-label="Send story reply">{replyMutation.isPending ? "…" : <HiPaperAirplane />}</button></div>
+              <div className="story-reactions">{["❤️", "😂", "😮", "👏"].map((emoji) => <button key={emoji} type="button" onClick={() => react(emoji)} disabled={isOwner || reactionMutation.isPending}>{emoji}</button>)}{!isOwner && <button type="button" className="story-report" onClick={() => reportMutation.mutate()} disabled={reportMutation.isPending}>{reportMutation.isPending ? "Reporting…" : "Report"}</button>}</div>
+              <div className="story-reply"><input value={reply} onChange={(event) => setReply(event.target.value)} placeholder={isOwner ? "This is your story" : `Reply to ${activeStory.user?.username?.split(" ")[0]}…`} disabled={isOwner || replyMutation.isPending} onKeyDown={(event) => event.key === "Enter" && sendReply()} /><button type="button" onClick={sendReply} disabled={!reply.trim() || isOwner || replyMutation.isPending} aria-label="Send story reply">{replyMutation.isPending ? "…" : <HiPaperAirplane />}</button></div>
               {replyError && <p className="story-reply-error" role="alert">{replyError}</p>}
               {reactionError && <p className="story-reply-error" role="alert">{reactionError}</p>}
+              {reportError && <p className="story-reply-error" role="alert">{reportError}</p>}
+              {deleteError && <p className="story-reply-error" role="alert">{deleteError}</p>}
               {storiesError && <p className="story-reply-error" role="alert">Could not refresh the story list.</p>}
             </footer>
           </motion.div>
